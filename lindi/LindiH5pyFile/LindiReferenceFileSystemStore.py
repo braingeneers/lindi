@@ -1,4 +1,5 @@
-from typing import Literal, Dict, Union
+from dataclasses import dataclass
+from typing import Any, Dict, Literal, Mapping, Sequence, Union
 import os
 import json
 import time
@@ -8,7 +9,34 @@ import requests
 from zarr.storage import Store as ZarrStore
 
 from ..LocalCache.LocalCache import ChunkTooLargeError, LocalCache
+from ..remote_reading import (
+    ByteRange,
+    LindiRemoteReadMetrics,
+    LindiRemoteReadOptions,
+    fetch_byte_range_requests,
+    plan_byte_range_requests,
+)
 from ..tar.lindi_tar import LindiTarFile
+
+
+@dataclass(frozen=True)
+class _ResolvedReference:
+    key: str
+    data: Union[bytes, None] = None
+    url_or_path: Union[str, None] = None
+    offset: int = 0
+    length: int = 0
+
+    @property
+    def is_inline(self) -> bool:
+        return self.data is not None
+
+    @property
+    def is_remote(self) -> bool:
+        return self.url_or_path is not None and (
+            self.url_or_path.startswith("http://")
+            or self.url_or_path.startswith("https://")
+        )
 
 
 class LindiReferenceFileSystemStore(ZarrStore):
@@ -78,6 +106,7 @@ class LindiReferenceFileSystemStore(ZarrStore):
             *,
             mode: Literal["r", "r+"] = "r+",
             local_cache: Union[LocalCache, None] = None,
+            remote_read_options: Union[LindiRemoteReadOptions, None] = None,
             _source_url_or_path: Union[str, None] = None,
             _source_tar_file: Union[LindiTarFile, None] = None
     ):
@@ -93,6 +122,9 @@ class LindiReferenceFileSystemStore(ZarrStore):
         local_cache : LocalCache, optional
             The local cache to use for caching data chunks read from the
             remote URLs. If None, no caching is done.
+        remote_read_options : LindiRemoteReadOptions, optional
+            Coalescing, concurrency, retry, and instrumentation options for
+            remote chunk references.
         """
         if "refs" not in rfs:
             raise Exception("rfs must contain a 'refs' key")
@@ -125,6 +157,7 @@ class LindiReferenceFileSystemStore(ZarrStore):
         self.rfs = rfs
         self.mode = mode
         self.local_cache = local_cache
+        self.remote_read_options = remote_read_options or LindiRemoteReadOptions()
         self._source_url_or_path = _source_url_or_path
         self._source_tar_file = _source_tar_file
 
@@ -145,16 +178,23 @@ class LindiReferenceFileSystemStore(ZarrStore):
         return val
 
     def _get_helper(self, key: str):
+        reference = self._resolve_reference(key)
+        if reference.is_inline:
+            return reference.data
+        return self._read_resolved_reference(reference)
+
+    def _resolve_reference(self, key: str) -> _ResolvedReference:
         if key not in self.rfs["refs"]:
             raise KeyError(key)
         x = self.rfs["refs"][key]
         if isinstance(x, str):
             if x.startswith("base64:"):
-                return base64.b64decode(x[len("base64:"):])
+                data = base64.b64decode(x[len("base64:"):])
             else:
-                return x.encode("utf-8")
+                data = x.encode("utf-8")
+            return _ResolvedReference(key=key, data=data)
         elif isinstance(x, dict):
-            return json.dumps(x).encode("utf-8")
+            return _ResolvedReference(key=key, data=json.dumps(x).encode("utf-8"))
         elif isinstance(x, list):
             if len(x) != 3:
                 raise Exception("list must have 3 elements")  # pragma: no cover
@@ -164,7 +204,6 @@ class LindiReferenceFileSystemStore(ZarrStore):
             if '{{' in url_or_path and '}}' in url_or_path and 'templates' in self.rfs:
                 for k, v in self.rfs["templates"].items():
                     url_or_path = url_or_path.replace("{{" + k + "}}", v)
-            is_url = url_or_path.startswith('http://') or url_or_path.startswith('https://')
             if url_or_path.startswith('./'):
                 if self._source_url_or_path is None:
                     raise Exception(f"Cannot resolve relative path {url_or_path} without source file path")
@@ -184,31 +223,160 @@ class LindiReferenceFileSystemStore(ZarrStore):
                     if offset + length > file_size:
                         raise Exception(f"Chunk {key} is out of bounds in tar file {url_or_path}: {fname}")
                     url_or_path = fname
-                else:
-                    if is_url:
-                        raise Exception(f"Cannot resolve relative path {url_or_path} for URL that is not a tar")
-                    else:
-                        source_file_parent_dir = '/'.join(self._source_url_or_path.split('/')[:-1])
-                        abs_path = source_file_parent_dir + '/' + url_or_path[2:]
-                        url_or_path = abs_path
-            if is_url:
-                if self.local_cache is not None:
-                    x = self.local_cache.get_remote_chunk(url=url_or_path, offset=offset, size=length)
-                    if x is not None:
-                        return x
-                val = _read_bytes_from_url_or_path(url_or_path, offset, length)
-                if self.local_cache is not None:
-                    try:
-                        self.local_cache.put_remote_chunk(url=url_or_path, offset=offset, size=length, data=val)
-                    except ChunkTooLargeError:
-                        print(f'Warning: unable to cache chunk of size {length} on LocalCache (key: {key})')
-            else:
-                val = _read_bytes_from_url_or_path(url_or_path, offset, length)
-            return val
+            return _ResolvedReference(
+                key=key,
+                url_or_path=url_or_path,
+                offset=offset,
+                length=length,
+            )
         else:
             # should not happen given checks in __init__, but self.rfs is mutable
             # and contains mutable lists
             raise Exception(f"Problem with {key}: value {x} must be a string or a list")
+
+    def _read_resolved_reference(self, reference: _ResolvedReference) -> bytes:
+        if reference.url_or_path is None:
+            raise ValueError("Resolved byte reference has no URL or path")
+        if reference.is_remote and self.local_cache is not None:
+            cached = self.local_cache.get_remote_chunk(
+                url=reference.url_or_path,
+                offset=reference.offset,
+                size=reference.length,
+            )
+            if cached is not None:
+                return cached
+        data = _read_bytes_from_url_or_path(
+            reference.url_or_path, reference.offset, reference.length
+        )
+        if reference.is_remote:
+            self._put_in_local_cache(reference, data)
+        return data
+
+    def _put_in_local_cache(
+        self, reference: _ResolvedReference, data: bytes
+    ) -> None:
+        if self.local_cache is None or reference.url_or_path is None:
+            return
+        try:
+            self.local_cache.put_remote_chunk(
+                url=reference.url_or_path,
+                offset=reference.offset,
+                size=reference.length,
+                data=data,
+            )
+        except ChunkTooLargeError:
+            print(
+                f"Warning: unable to cache chunk of size {reference.length} "
+                f"on LocalCache (key: {reference.key})"
+            )
+
+    def getitems(
+        self,
+        keys: Sequence[str],
+        *,
+        contexts: Mapping[str, Any],
+    ) -> Mapping[str, bytes]:
+        """Retrieve all referenced chunks for one Zarr selection efficiently."""
+        del contexts  # Zarr store contexts are not needed for bytes output.
+        started = time.perf_counter()
+        unique_keys = list(dict.fromkeys(keys))
+        results: Dict[str, bytes] = {}
+        references_by_key: Dict[str, _ResolvedReference] = {}
+        remote_ranges = []
+        inline_value_count = 0
+        local_file_read_count = 0
+        remote_reference_count = 0
+        cache_hit_count = 0
+
+        for key in unique_keys:
+            try:
+                reference = self._resolve_reference(key)
+            except KeyError:
+                continue
+            if reference.is_inline:
+                assert reference.data is not None
+                results[key] = reference.data
+                inline_value_count += 1
+                continue
+            if reference.url_or_path is None:
+                raise ValueError("Resolved byte reference has no URL or path")
+            if not reference.is_remote:
+                results[key] = _read_bytes_from_url_or_path(
+                    reference.url_or_path, reference.offset, reference.length
+                )
+                local_file_read_count += 1
+                continue
+
+            remote_reference_count += 1
+            if self.local_cache is not None:
+                cached = self.local_cache.get_remote_chunk(
+                    url=reference.url_or_path,
+                    offset=reference.offset,
+                    size=reference.length,
+                )
+                if cached is not None:
+                    results[key] = cached
+                    cache_hit_count += 1
+                    continue
+            if reference.length == 0:
+                results[key] = b""
+                continue
+            references_by_key[key] = reference
+            remote_ranges.append(
+                ByteRange(
+                    key=key,
+                    source=reference.url_or_path,
+                    offset=reference.offset,
+                    length=reference.length,
+                )
+            )
+
+        planned_requests = plan_byte_range_requests(
+            remote_ranges, self.remote_read_options
+        )
+        fetched_requests = fetch_byte_range_requests(
+            planned_requests, self.remote_read_options
+        )
+        for fetched in fetched_requests:
+            request = fetched.request
+            for byte_range in request.ranges:
+                relative_start = byte_range.offset - request.offset
+                relative_end = relative_start + byte_range.length
+                chunk_data = fetched.data[relative_start:relative_end]
+                if len(chunk_data) != byte_range.length:
+                    raise ValueError(
+                        f"Unable to reconstruct {byte_range.key}: "
+                        f"received {len(chunk_data)} bytes, expected {byte_range.length}"
+                    )
+                results[byte_range.key] = chunk_data
+                self._put_in_local_cache(
+                    references_by_key[byte_range.key], chunk_data
+                )
+
+        for key, value in list(results.items()):
+            padded_size = _get_padded_size(self, key, value)
+            if padded_size is not None:
+                results[key] = _pad_chunk(value, padded_size)
+
+        metrics = LindiRemoteReadMetrics(
+            optimized=self.remote_read_options.enabled,
+            requested_key_count=len(unique_keys),
+            returned_key_count=len(results),
+            inline_value_count=inline_value_count,
+            local_file_read_count=local_file_read_count,
+            remote_reference_count=remote_reference_count,
+            cache_hit_count=cache_hit_count,
+            source_range_count=len(remote_ranges),
+            planned_request_count=len(planned_requests),
+            range_get_count=sum(x.attempt_count for x in fetched_requests),
+            requested_bytes=sum(x.requested_bytes for x in planned_requests),
+            fetched_bytes=sum(len(x.data) for x in fetched_requests),
+            overread_bytes=sum(x.overread_bytes for x in planned_requests),
+            elapsed_seconds=time.perf_counter() - started,
+        )
+        if self.remote_read_options.metrics_callback is not None:
+            self.remote_read_options.metrics_callback(metrics)
+        return results
 
     def __setitem__(self, key: str, value: bytes):
         # We intentionally do not allow value to be a dict here! When the rfs is

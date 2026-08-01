@@ -645,6 +645,12 @@ class LindiH5ZarrStore(Store):
             return self._external_array_links[parent_key]
         # Important to set it to None so that we don't keep checking it
         self._external_array_links[parent_key] = None
+        normalized_parent_key = parent_key.strip('/')
+        forced_reference_paths = {
+            path.strip('/') for path in self._opts.force_explicit_chunk_references
+        }
+        if normalized_parent_key in forced_reference_paths:
+            return None
         if h5_item.chunks and self._opts.num_dataset_chunks_threshold is not None:
             # We compute the expected number of chunks using the shape and chunks
             # and compare it to the threshold. If it's greater, then we create an

@@ -234,6 +234,53 @@ data = f['processing/ecephys/LFP/LFP/data'][:1000]
 - Enables faster iteration when developing and testing code with remote data
 - Particularly effective for accessing NWB files from DANDI Archive multiple times
 
+## High-performance remote reads
+
+LINDI batches all chunk references needed by one Zarr selection, coalesces
+adjacent byte ranges, and fetches independent ranges concurrently. Zarr remains
+responsible for selection semantics, decompression, filters, and array assembly.
+
+```python
+import lindi
+
+read_metrics = []
+options = lindi.LindiRemoteReadOptions(
+    max_gap_bytes=1024 * 1024,
+    max_overread_bytes=8 * 1024 * 1024,
+    max_concurrency=8,
+    metrics_callback=read_metrics.append,
+)
+
+with lindi.LindiH5pyFile.from_lindi_file(
+    "recording.nwb.lindi.json",
+    remote_read_options=options,
+) as file:
+    data = file["acquisition/ElectricalSeries/data"]
+    window = data[1_000_000:1_100_000, [0, 1, 128, 129]]
+
+print(read_metrics[-1])
+```
+
+The fast path requires explicit chunk references. When generating a LINDI JSON,
+force those references only for the target arrays so other very large datasets
+can retain compact external links:
+
+```python
+opts = lindi.LindiH5ZarrStoreOpts(
+    force_explicit_chunk_references=(
+        "acquisition/ElectricalSeries/data",
+    )
+)
+with lindi.LindiH5pyFile.from_hdf5_file(
+    remote_nwb_url,
+    zarr_store_opts=opts,
+) as file:
+    file.write_lindi_file("recording.nwb.lindi.json")
+```
+
+See [the campaign harness](benchmarks/README.md) for reproducible Ceph/S3
+measurement and an instrumented sequential baseline.
+
 ## Notes
 
 This project was inspired by [kerchunk](https://github.com/fsspec/kerchunk) and [hdmf-zarr](https://hdmf-zarr.readthedocs.io/en/latest/index.html).

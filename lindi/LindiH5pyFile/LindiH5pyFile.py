@@ -15,6 +15,7 @@ from .LindiReferenceFileSystemStore import LindiReferenceFileSystemStore
 from ..LindiH5ZarrStore.LindiH5ZarrStoreOpts import LindiH5ZarrStoreOpts
 
 from ..LocalCache.LocalCache import LocalCache
+from ..remote_reading import LindiRemoteReadOptions
 
 from ..LindiH5ZarrStore._util import _write_rfs_to_file
 
@@ -47,7 +48,13 @@ class LindiH5pyFile(h5py.File):
         self._is_open = True
 
     @staticmethod
-    def from_lindi_file(url_or_path: str, *, mode: LindiFileMode = "r", local_cache: Union[LocalCache, None] = None):
+    def from_lindi_file(
+        url_or_path: str,
+        *,
+        mode: LindiFileMode = "r",
+        local_cache: Union[LocalCache, None] = None,
+        remote_read_options: Union[LindiRemoteReadOptions, None] = None,
+    ):
         """
         Create a LindiH5pyFile from a URL or path to a .lindi.json file.
 
@@ -56,7 +63,8 @@ class LindiH5pyFile(h5py.File):
         return LindiH5pyFile.from_reference_file_system(
             url_or_path,
             mode=mode,
-            local_cache=local_cache
+            local_cache=local_cache,
+            remote_read_options=remote_read_options,
         )
 
     @staticmethod
@@ -101,7 +109,16 @@ class LindiH5pyFile(h5py.File):
         )
 
     @staticmethod
-    def from_reference_file_system(rfs: Union[dict, str], *, mode: LindiFileMode = "r", local_cache: Union[LocalCache, None] = None, _source_url_or_path: Union[str, None] = None, _source_tar_file: Union[LindiTarFile, None] = None, _close_source_tar_file_on_close: bool = False):
+    def from_reference_file_system(
+        rfs: Union[dict, str],
+        *,
+        mode: LindiFileMode = "r",
+        local_cache: Union[LocalCache, None] = None,
+        remote_read_options: Union[LindiRemoteReadOptions, None] = None,
+        _source_url_or_path: Union[str, None] = None,
+        _source_tar_file: Union[LindiTarFile, None] = None,
+        _close_source_tar_file_on_close: bool = False,
+    ):
         """
         Create a LindiH5pyFile from a reference file system.
 
@@ -115,6 +132,9 @@ class LindiH5pyFile(h5py.File):
             The mode to open the file object in, by default "r".
         local_cache : Union[LocalCache, None], optional
             The local cache to use for caching data, by default None.
+        remote_read_options : Union[LindiRemoteReadOptions, None], optional
+            Coalescing, concurrency, retry, and instrumentation options for
+            remote chunk references. Defaults to LindiRemoteReadOptions().
         _source_url_or_path : Union[str, None], optional
             Internal use only
         _source_tar_file : Union[LindiTarFile, None], optional
@@ -134,6 +154,7 @@ class LindiH5pyFile(h5py.File):
                     data,
                     mode=mode,
                     local_cache=local_cache,
+                    remote_read_options=remote_read_options,
                     _source_tar_file=tar_file,
                     _source_url_or_path=rfs,
                     _close_source_tar_file_on_close=_close_source_tar_file_on_close
@@ -176,6 +197,7 @@ class LindiH5pyFile(h5py.File):
                     data,
                     mode=mode,
                     local_cache=local_cache,
+                    remote_read_options=remote_read_options,
                     _source_url_or_path=rfs,
                     _source_tar_file=tar_file,
                     _close_source_tar_file_on_close=True
@@ -185,6 +207,7 @@ class LindiH5pyFile(h5py.File):
             store = LindiReferenceFileSystemStore(
                 rfs,
                 local_cache=local_cache,
+                remote_read_options=remote_read_options,
                 _source_url_or_path=_source_url_or_path,
                 _source_tar_file=_source_tar_file
             )

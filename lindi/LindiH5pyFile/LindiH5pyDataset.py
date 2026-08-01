@@ -179,6 +179,15 @@ class LindiH5pyDataset(h5py.Dataset):
             raise Exception("new_dtype is not supported for zarr.Array")
         return self._get_item_for_zarr(self._zarr_array, args)
 
+    def __array__(self, dtype=None, copy=None):
+        """Materialize through LINDI rather than h5py's low-level dataset ID."""
+        array = np.asarray(self[()])
+        if dtype is not None:
+            array = array.astype(dtype, copy=False)
+        if copy is True:
+            array = array.copy()
+        return array
+
     def _get_item_for_zarr(self, zarr_array: zarr.Array, selection: Any):
         # First check whether this is an external array link
         external_array_link = zarr_array.attrs.get("_EXTERNAL_ARRAY_LINK", None)
