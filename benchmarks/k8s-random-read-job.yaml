@@ -1,0 +1,65 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ${JOB_NAME}
+  labels:
+    app.kubernetes.io/name: lindi-s3-benchmark
+    app.kubernetes.io/component: random-read
+    lindi.braingeneers.io/campaign: ${CAMPAIGN}
+    lindi.braingeneers.io/pattern: ${PATTERN}
+    lindi.braingeneers.io/strategy: ${STRATEGY}
+    lindi.braingeneers.io/concurrency: "${MAX_CONCURRENCY}"
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 3600
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: lindi-s3-benchmark
+        app.kubernetes.io/component: random-read
+        lindi.braingeneers.io/campaign: ${CAMPAIGN}
+    spec:
+      restartPolicy: Never
+      imagePullSecrets:
+        - name: dockerhub
+      containers:
+        - name: benchmark
+          image: ${IMAGE}
+          imagePullPolicy: Always
+          args:
+            - --lindi-url
+            - ${LINDI_URL}
+            - --dataset
+            - /acquisition/ElectricalSeries/data
+            - --pattern
+            - ${PATTERN}
+            - --strategy
+            - ${STRATEGY}
+            - --window-samples
+            - "${WINDOW_SAMPLES}"
+            - --iterations
+            - "${ITERATIONS}"
+            - --seed
+            - "${SEED}"
+            - --max-gap-bytes
+            - "${MAX_GAP_BYTES}"
+            - --max-overread-bytes
+            - "${MAX_OVERREAD_BYTES}"
+            - --max-concurrency
+            - "${MAX_CONCURRENCY}"
+            - --label
+            - ${JOB_NAME}
+          resources:
+            requests:
+              cpu: "1"
+              memory: 2Gi
+              ephemeral-storage: 1Gi
+            limits:
+              cpu: "1"
+              memory: 2Gi
+              ephemeral-storage: 1Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]

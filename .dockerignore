@@ -1,0 +1,9 @@
+*
+!README.md
+!pyproject.toml
+!lindi/
+!lindi/**
+!benchmarks/
+!benchmarks/Dockerfile.nrp
+!benchmarks/benchmark_random_remote_ranges.py
+

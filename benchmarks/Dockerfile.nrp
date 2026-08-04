@@ -1,0 +1,14 @@
+FROM davidparks21/maxwell-to-nwb:20260724-nwb-metadata-v1
+
+ARG LINDI_REVISION=unknown
+LABEL org.opencontainers.image.title="LINDI remote S3 benchmark" \
+      org.opencontainers.image.revision="${LINDI_REVISION}"
+
+COPY README.md pyproject.toml /opt/lindi-source/
+COPY lindi /opt/lindi-source/lindi
+RUN python -m pip install --no-deps /opt/lindi-source
+
+COPY benchmarks/benchmark_random_remote_ranges.py /opt/lindi-benchmark/benchmark_random_remote_ranges.py
+WORKDIR /opt/lindi-benchmark
+ENTRYPOINT ["python", "benchmark_random_remote_ranges.py"]
+
