@@ -18,7 +18,7 @@ import re
 import time
 from pathlib import Path
 from typing import Any, Iterable, Sequence
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
 import requests
 
@@ -78,6 +78,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--retry-backoff-seconds", type=float, default=0.1)
     parser.add_argument("--request-timeout-seconds", type=float, default=120.0)
     parser.add_argument("--metadata-timeout-seconds", type=float, default=300.0)
+    parser.add_argument("--metadata-max-retries", type=_nonnegative_int, default=3)
+    parser.add_argument(
+        "--source-endpoint",
+        help="Replace each external reference's scheme and host with this HTTP(S) endpoint.",
+    )
     parser.add_argument("--label", default="")
     parser.add_argument("--output")
     args = parser.parse_args()
@@ -89,21 +94,41 @@ def _parse_args() -> argparse.Namespace:
         parser.error("--retry-backoff-seconds must be nonnegative")
     if args.request_timeout_seconds <= 0 or args.metadata_timeout_seconds <= 0:
         parser.error("timeouts must be greater than zero")
+    if args.source_endpoint:
+        endpoint = urlsplit(args.source_endpoint)
+        if endpoint.scheme not in {"http", "https"} or not endpoint.netloc:
+            parser.error("--source-endpoint must be an HTTP(S) endpoint")
+        if endpoint.query or endpoint.fragment:
+            parser.error("--source-endpoint cannot contain a query or fragment")
     return args
 
 
-def _load_sidecar(url: str, timeout_seconds: float) -> tuple[dict[str, Any], int, float]:
+def _load_sidecar(
+    url: str,
+    timeout_seconds: float,
+    max_retries: int,
+    retry_backoff_seconds: float,
+) -> tuple[dict[str, Any], int, float, int]:
     if urlsplit(url).scheme not in {"http", "https"}:
         raise ValueError("the benchmark accepts only read-only HTTP(S) sidecars")
     started = time.perf_counter()
-    response = requests.get(url, timeout=timeout_seconds)
-    response.raise_for_status()
+    attempts = 0
+    while True:
+        attempts += 1
+        try:
+            response = requests.get(url, timeout=timeout_seconds)
+            response.raise_for_status()
+            break
+        except requests.RequestException:
+            if attempts > max_retries:
+                raise
+            time.sleep(retry_backoff_seconds * (2 ** (attempts - 1)))
     content = response.content
     elapsed = time.perf_counter() - started
     document = json.loads(content)
     if not isinstance(document, dict) or not isinstance(document.get("refs"), dict):
         raise ValueError("invalid LINDI reference document")
-    return document, len(content), elapsed
+    return document, len(content), elapsed, attempts
 
 
 def _metadata_object(value: Any, key: str) -> dict[str, Any]:
@@ -130,6 +155,15 @@ def _expand_template(value: str, templates: dict[str, Any]) -> str:
     if urlsplit(expanded).scheme not in {"http", "https"}:
         raise ValueError(f"chunk source is not read-only HTTP(S): {expanded!r}")
     return expanded
+
+
+def _replace_source_endpoint(source: str, source_endpoint: str | None) -> str:
+    if not source_endpoint:
+        return source
+    original = urlsplit(source)
+    endpoint = urlsplit(source_endpoint)
+    path = endpoint.path.rstrip("/") + original.path
+    return urlunsplit((endpoint.scheme, endpoint.netloc, path, original.query, original.fragment))
 
 
 def _chunk_coordinates(
@@ -173,6 +207,7 @@ def _selection_ranges(
     channel: int | None,
     time_axis: int,
     channel_axis: int,
+    source_endpoint: str | None,
 ) -> list[ByteRange]:
     shape = tuple(int(value) for value in zarray["shape"])
     chunks = tuple(int(value) for value in zarray["chunks"])
@@ -201,7 +236,9 @@ def _selection_ranges(
         ranges.append(
             ByteRange(
                 key=key,
-                source=_expand_template(source, templates),
+                source=_replace_source_endpoint(
+                    _expand_template(source, templates), source_endpoint
+                ),
                 offset=int(offset),
                 length=int(length),
             )
@@ -288,8 +325,11 @@ def _run_strategy(
 
 def _main() -> None:
     args = _parse_args()
-    document, metadata_bytes, metadata_seconds = _load_sidecar(
-        args.lindi_url, args.metadata_timeout_seconds
+    document, metadata_bytes, metadata_seconds, metadata_attempts = _load_sidecar(
+        args.lindi_url,
+        args.metadata_timeout_seconds,
+        args.metadata_max_retries,
+        args.retry_backoff_seconds,
     )
     refs = document["refs"]
     templates = document.get("templates") or {}
@@ -324,6 +364,8 @@ def _main() -> None:
                 "chunks": chunks,
                 "metadata_bytes": metadata_bytes,
                 "metadata_seconds": metadata_seconds,
+                "metadata_attempts": metadata_attempts,
+                "source_endpoint": args.source_endpoint,
             },
             sort_keys=True,
         ),
@@ -349,6 +391,7 @@ def _main() -> None:
             channel=channel,
             time_axis=args.time_axis,
             channel_axis=args.channel_axis,
+            source_endpoint=args.source_endpoint,
         )
         print(
             json.dumps(
@@ -409,6 +452,9 @@ def _main() -> None:
         "chunks": chunks,
         "metadata_bytes": metadata_bytes,
         "metadata_seconds": metadata_seconds,
+        "metadata_attempts": metadata_attempts,
+        "metadata_max_retries": args.metadata_max_retries,
+        "source_endpoint": args.source_endpoint,
         "max_gap_bytes": args.max_gap_bytes,
         "max_overread_bytes": args.max_overread_bytes,
         "max_request_bytes": args.max_request_bytes,
@@ -425,4 +471,3 @@ def _main() -> None:
 
 if __name__ == "__main__":
     _main()
-

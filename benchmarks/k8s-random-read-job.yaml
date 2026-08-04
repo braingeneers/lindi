@@ -9,6 +9,7 @@ metadata:
     lindi.braingeneers.io/pattern: ${PATTERN}
     lindi.braingeneers.io/strategy: ${STRATEGY}
     lindi.braingeneers.io/concurrency: "${MAX_CONCURRENCY}"
+    lindi.braingeneers.io/route: ${ROUTE}
 spec:
   backoffLimit: 0
   activeDeadlineSeconds: 3600
@@ -19,6 +20,7 @@ spec:
         app.kubernetes.io/name: lindi-s3-benchmark
         app.kubernetes.io/component: random-read
         lindi.braingeneers.io/campaign: ${CAMPAIGN}
+        lindi.braingeneers.io/route: ${ROUTE}
     spec:
       restartPolicy: Never
       imagePullSecrets:
@@ -48,6 +50,10 @@ spec:
             - "${MAX_OVERREAD_BYTES}"
             - --max-concurrency
             - "${MAX_CONCURRENCY}"
+            - --metadata-max-retries
+            - "${METADATA_MAX_RETRIES}"
+            - --source-endpoint
+            - ${SOURCE_ENDPOINT}
             - --label
             - ${JOB_NAME}
           resources:
