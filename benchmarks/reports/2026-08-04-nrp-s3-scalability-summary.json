@@ -1,0 +1,70 @@
+{
+  "schema_version": 1,
+  "campaign": "lindi-s3-20260804-a",
+  "date": "2026-08-04",
+  "reader_commit": "cae07e2",
+  "tooling_commit": "337f068",
+  "image": "davidparks21/lindi:20260804-s3-reader-337f068",
+  "image_digest": "sha256:618065125636f994c55835685f6e8c8deb03597e510370d69269889bd4101036",
+  "dataset": {
+    "workflow_run_id": "57687039-0c67-4ada-8a88-d15c5826436f",
+    "uuid": "2026-07-29-e-24472J_H9SynGFP_MO_SCH",
+    "nwb_bytes": 3398188127,
+    "sidecar_bytes": 63105499,
+    "reference_count": 613034,
+    "shape": [12159800, 1008],
+    "chunks": [20000, 1],
+    "filter": "maxwell-mxw-data"
+  },
+  "single_channel_20_queries": {
+    "internal": {
+      "baseline_gets": 60,
+      "optimized_gets": 20,
+      "baseline_mean_seconds": 0.2214906987734139,
+      "optimized_mean_seconds": 0.13064137576147913,
+      "baseline_median_seconds": 0.20690856548026204,
+      "optimized_median_seconds": 0.11538785835728049,
+      "byte_exact": true,
+      "retries": 0
+    },
+    "public": {
+      "baseline_gets": 61,
+      "optimized_gets": 20,
+      "baseline_mean_seconds": 1.9994828369002788,
+      "optimized_mean_seconds": 1.5527967150788755,
+      "baseline_median_seconds": 1.1421223422512412,
+      "optimized_median_seconds": 0.7541645169258118,
+      "byte_exact": true,
+      "retries": 1
+    }
+  },
+  "all_channel_same_node_internal": [
+    {"concurrency": 1, "seconds": 67.38826649799012, "mib_per_second": 0.07767652815421718},
+    {"concurrency": 2, "seconds": 21.993020249006804, "mib_per_second": 0.2380067185238647},
+    {"concurrency": 4, "seconds": 12.800202165002702, "mib_per_second": 0.4089378052330094},
+    {"concurrency": 8, "seconds": 5.623555357014993, "mib_per_second": 0.9308144487926775},
+    {"concurrency": 16, "seconds": 3.121091962995706, "mib_per_second": 1.6771330809717064},
+    {"concurrency": 32, "seconds": 1.946670314995572, "mib_per_second": 2.688943546101655}
+  ],
+  "all_channel_public": [
+    {"concurrency": 1, "seconds": 507.0778529049712, "mib_per_second": 0.010322845988850526},
+    {"concurrency": 8, "seconds": 18.825922211050056, "mib_per_second": 0.27804675495910564},
+    {"concurrency": 32, "seconds": 5.6590022500022314, "mib_per_second": 0.924984007541781}
+  ],
+  "four_worker_internal": {
+    "jobs": 4,
+    "queries": 12,
+    "range_gets": 12096,
+    "mean_seconds": 7.877949383754943,
+    "median_seconds": 7.87011923751561,
+    "p95_seconds": 8.734488588001113,
+    "retries": 0
+  },
+  "acceptance": {
+    "transport_byte_exact": true,
+    "single_channel_coalescing": true,
+    "all_channel_parallelism": true,
+    "decoded_array_exact": false,
+    "decoded_array_blocker": "maxwell-mxw-data codec is unavailable"
+  }
+}
