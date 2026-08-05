@@ -4,6 +4,7 @@ import os
 import requests
 from .additional_url_resolvers import get_additional_url_resolvers
 from ..LocalCache.LocalCache import LocalCache
+from ..remote_reading import DEFAULT_REMOTE_REQUEST_TIMEOUT_SECONDS
 
 default_min_chunk_size = 128 * 1024  # This is different from Remfile - this is an important decision because it determines the chunk size in the LocalCache
 default_max_cache_size = 1024 * 1024 * 1024
@@ -72,7 +73,11 @@ class LindiRemfile:
 
         # use aborted GET request rather than HEAD request to get the length
         # this is needed for presigned AWS URLs because HEAD requests are not supported
-        response = requests.get(_resolve_url(self._url), stream=True)
+        response = requests.get(
+            _resolve_url(self._url),
+            stream=True,
+            timeout=DEFAULT_REMOTE_REQUEST_TIMEOUT_SECONDS,
+        )
         if response.status_code == 200:
             self.length = int(response.headers["Content-Length"])
         else:
@@ -324,8 +329,20 @@ def _get_bytes(
                 range_header = f"bytes={range_start}-{range_end}"
                 # response = requests.get(actual_url, headers={'Range': range_header})
                 # use session to avoid creating a new connection each time
-                response = session.get(actual_url, headers={"Range": range_header})
-                return response.content
+                response = session.get(
+                    actual_url,
+                    headers={"Range": range_header},
+                    timeout=DEFAULT_REMOTE_REQUEST_TIMEOUT_SECONDS,
+                )
+                response.raise_for_status()
+                data = response.content
+                expected_length = range_end - range_start + 1
+                if len(data) != expected_length:
+                    raise ValueError(
+                        f"Unexpected byte count: received {len(data)}, "
+                        f"expected {expected_length}"
+                    )
+                return data
             except Exception as e:
                 if try_num == num_retries:
                     raise e  # pragma: no cover
@@ -364,7 +381,12 @@ def _resolve_dandi_url(url: str):
     if resolve_with_dandi_api_key is not None:
         headers['Authorization'] = f'token {resolve_with_dandi_api_key}'
     # do it synchronously here
-    resp = requests.head(url, allow_redirects=True, headers=headers)
+    resp = requests.head(
+        url,
+        allow_redirects=True,
+        headers=headers,
+        timeout=DEFAULT_REMOTE_REQUEST_TIMEOUT_SECONDS,
+    )
     return str(resp.url)
 
 

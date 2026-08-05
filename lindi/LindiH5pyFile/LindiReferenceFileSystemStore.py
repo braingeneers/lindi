@@ -11,11 +11,13 @@ from zarr.storage import Store as ZarrStore
 from ..LocalCache.LocalCache import ChunkTooLargeError, LocalCache
 from ..remote_reading import (
     ByteRange,
+    DEFAULT_REMOTE_REQUEST_TIMEOUT_SECONDS,
     LindiRemoteReadMetrics,
     LindiRemoteReadOptions,
     fetch_byte_range_requests,
     plan_byte_range_requests,
 )
+from ..remote_diagnostics import capture_remote_read_metrics
 from ..tar.lindi_tar import LindiTarFile
 
 
@@ -287,6 +289,9 @@ class LindiReferenceFileSystemStore(ZarrStore):
         local_file_read_count = 0
         remote_reference_count = 0
         cache_hit_count = 0
+        referenced_bytes = 0
+        cache_hit_bytes = 0
+        remote_keys = set()
 
         for key in unique_keys:
             try:
@@ -308,6 +313,8 @@ class LindiReferenceFileSystemStore(ZarrStore):
                 continue
 
             remote_reference_count += 1
+            referenced_bytes += reference.length
+            remote_keys.add(key)
             if self.local_cache is not None:
                 cached = self.local_cache.get_remote_chunk(
                     url=reference.url_or_path,
@@ -317,6 +324,7 @@ class LindiReferenceFileSystemStore(ZarrStore):
                 if cached is not None:
                     results[key] = cached
                     cache_hit_count += 1
+                    cache_hit_bytes += reference.length
                     continue
             if reference.length == 0:
                 results[key] = b""
@@ -373,8 +381,15 @@ class LindiReferenceFileSystemStore(ZarrStore):
             fetched_bytes=sum(len(x.data) for x in fetched_requests),
             overread_bytes=sum(x.overread_bytes for x in planned_requests),
             elapsed_seconds=time.perf_counter() - started,
+            referenced_bytes=referenced_bytes,
+            cache_hit_bytes=cache_hit_bytes,
         )
-        if self.remote_read_options.metrics_callback is not None:
+        captured = capture_remote_read_metrics(
+            metrics,
+            options=self.remote_read_options,
+            remote_keys=tuple(remote_keys.intersection(results)),
+        )
+        if not captured and self.remote_read_options.metrics_callback is not None:
             self.remote_read_options.metrics_callback(metrics)
         return results
 
@@ -497,7 +512,11 @@ def _read_bytes_from_url_or_path(url_or_path: str, offset: int, length: int):
                     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3",
                     "Range": range_header
                 }
-                response = requests.get(url_resolved, headers=headers)
+                response = requests.get(
+                    url_resolved,
+                    headers=headers,
+                    timeout=DEFAULT_REMOTE_REQUEST_TIMEOUT_SECONDS,
+                )
                 response.raise_for_status()
                 return response.content
             except Exception as e:

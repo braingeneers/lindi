@@ -8,9 +8,15 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    name: integration tests
+    name: integration tests (Python ${{ matrix.python-version }})
+    strategy:
+      matrix:
+        python-version: ["3.9", "3.12"]
     steps:
-    - uses: actions/checkout@v1
+    - uses: actions/checkout@v4
+    - uses: actions/setup-python@v5
+      with:
+        python-version: ${{ matrix.python-version }}
     - name: Install
       run: pip install .
     - name: Install packages needed for tests

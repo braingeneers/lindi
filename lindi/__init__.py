@@ -9,7 +9,14 @@ from .LindiH5pyFile import (
 from .LindiH5ZarrStore import LindiH5ZarrStore, LindiH5ZarrStoreOpts
 from .LindiRemfile.additional_url_resolvers import add_additional_url_resolver
 from .LocalCache.LocalCache import ChunkTooLargeError, LocalCache
-from .remote_reading import LindiRemoteReadMetrics, LindiRemoteReadOptions
+from .remote_reading import (
+    LindiRemoteEfficiencyThresholds,
+    LindiRemoteEfficiencyWarning,
+    LindiRemoteLayoutError,
+    LindiRemoteLayoutWarning,
+    LindiRemoteReadMetrics,
+    LindiRemoteReadOptions,
+)
 
 __all__ = [
     "LindiH5ZarrStore",
@@ -25,4 +32,8 @@ __all__ = [
     "add_additional_url_resolver",
     "LindiRemoteReadMetrics",
     "LindiRemoteReadOptions",
+    "LindiRemoteEfficiencyThresholds",
+    "LindiRemoteEfficiencyWarning",
+    "LindiRemoteLayoutError",
+    "LindiRemoteLayoutWarning",
 ]

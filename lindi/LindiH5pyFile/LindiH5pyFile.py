@@ -2,6 +2,7 @@ from typing import Union, Literal
 import os
 import json
 import tempfile
+import threading
 import urllib.request
 import h5py
 import zarr
@@ -15,7 +16,11 @@ from .LindiReferenceFileSystemStore import LindiReferenceFileSystemStore
 from ..LindiH5ZarrStore.LindiH5ZarrStoreOpts import LindiH5ZarrStoreOpts
 
 from ..LocalCache.LocalCache import LocalCache
-from ..remote_reading import LindiRemoteReadOptions
+from ..remote_diagnostics import validate_nwb_electrical_series_layout
+from ..remote_reading import (
+    DEFAULT_REMOTE_REQUEST_TIMEOUT_SECONDS,
+    LindiRemoteReadOptions,
+)
 
 from ..LindiH5ZarrStore._util import _write_rfs_to_file
 
@@ -41,6 +46,14 @@ class LindiH5pyFile(h5py.File):
         self._source_url_or_path = _source_url_or_path
         self._source_tar_file = _source_tar_file
         self._close_source_tar_file_on_close = _close_source_tar_file_on_close
+        base_store = (
+            _zarr_store._base_store
+            if isinstance(_zarr_store, LindiTarStore)
+            else _zarr_store
+        )
+        self._remote_read_options = getattr(base_store, "remote_read_options", None)
+        self._remote_efficiency_warned_categories = set()
+        self._remote_efficiency_warning_lock = threading.Lock()
 
         # see comment in LindiH5pyGroup
         self._id = f'{id(self._zarr_group)}/'
@@ -211,6 +224,7 @@ class LindiH5pyFile(h5py.File):
                 _source_url_or_path=_source_url_or_path,
                 _source_tar_file=_source_tar_file
             )
+            validate_nwb_electrical_series_layout(store)
             source_is_url = _source_url_or_path is not None and (_source_url_or_path.startswith("http://") or _source_url_or_path.startswith("https://"))
             if _source_url_or_path and _source_tar_file and not source_is_url:
                 store = LindiTarStore(base_store=store, tar_file=_source_tar_file)
@@ -513,11 +527,16 @@ class LindiH5pyFile(h5py.File):
 
 
 def _download_file(url: str, filename: str) -> None:
+    if not url.startswith(("http://", "https://")):
+        raise ValueError(f"Unsupported remote URL scheme: {url}")
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3"
     }
     req = urllib.request.Request(url, headers=headers)
-    with urllib.request.urlopen(req) as response:
+    # The scheme is restricted above.
+    with urllib.request.urlopen(  # nosec B310
+        req, timeout=DEFAULT_REMOTE_REQUEST_TIMEOUT_SECONDS
+    ) as response:
         with open(filename, "wb") as f:
             f.write(response.read())
 
@@ -655,21 +674,31 @@ def _check_is_tar_header(header_buf: bytes) -> bool:
 
 
 def _get_file_size_of_remote_file(url: str) -> int:
+    if not url.startswith(("http://", "https://")):
+        raise ValueError(f"Unsupported remote URL scheme: {url}")
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3"
     }
     req = urllib.request.Request(url, headers=headers)
-    with urllib.request.urlopen(req) as response:
+    # The scheme is restricted above.
+    with urllib.request.urlopen(  # nosec B310
+        req, timeout=DEFAULT_REMOTE_REQUEST_TIMEOUT_SECONDS
+    ) as response:
         return int(response.headers['Content-Length'])
 
 
 def _download_file_byte_range(url: str, start: int, end: int) -> bytes:
+    if not url.startswith(("http://", "https://")):
+        raise ValueError(f"Unsupported remote URL scheme: {url}")
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3",
         "Range": f"bytes={start}-{end - 1}"
     }
     req = urllib.request.Request(url, headers=headers)
-    with urllib.request.urlopen(req) as response:
+    # The scheme is restricted above.
+    with urllib.request.urlopen(  # nosec B310
+        req, timeout=DEFAULT_REMOTE_REQUEST_TIMEOUT_SECONDS
+    ) as response:
         return response.read()
 
 

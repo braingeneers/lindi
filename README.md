@@ -261,6 +261,51 @@ with lindi.LindiH5pyFile.from_lindi_file(
 print(read_metrics[-1])
 ```
 
+By default, LINDI warns when an NWB `ElectricalSeries` does not use explicit
+time-by-one-channel chunks stored in coalescible channel-major order. It also
+warns once per dataset when a real selection causes severe chunk amplification,
+transport over-read, or request fragmentation. Both policies and their
+thresholds are configurable:
+
+```python
+options = lindi.LindiRemoteReadOptions(
+    layout_check="error",  # use "warn" (default), "error", or "ignore"
+    runtime_efficiency_check="warn",
+    efficiency_warning_thresholds=lindi.LindiRemoteEfficiencyThresholds(
+        chunk_amplification_ratio=8,
+        chunk_excess_bytes=1024 * 1024,
+        transport_overread_ratio=2,
+        transport_overread_bytes=1024 * 1024,
+        fragmented_request_count=8,
+    ),
+)
+```
+
+Runtime metrics keep logical/chunk amplification separate from compressed-byte
+transport over-read. This makes the runtime check useful for non-NWB LINDI
+arrays as well as NWB signals.
+
+Remote range requests retry transient connection failures, response-integrity
+failures, and HTTP 408, 429, 500, 502, 503, and 504 responses. Retries use
+randomized exponential backoff, honor `Retry-After`, and stop after both the
+configured attempt count and a per-range elapsed-time budget:
+
+```python
+options = lindi.LindiRemoteReadOptions(
+    max_retries=8,                    # retries after the initial attempt
+    retry_backoff_seconds=0.1,        # exponential-jitter multiplier
+    retry_max_backoff_seconds=10,
+    max_retry_elapsed_seconds=120,
+    respect_retry_after_header=True,
+    request_timeout_seconds=60,       # timeout for each HTTP attempt
+)
+```
+
+`range_get_count` includes every physical attempt, while elapsed metrics include
+retry waits. Permanent HTTP errors and TLS certificate validation failures are
+not retried. The elapsed-time budget prevents scheduling new attempts after the
+deadline; an attempt already in progress remains bounded by its request timeout.
+
 The fast path requires explicit chunk references. When generating a LINDI JSON,
 force those references only for the target arrays so other very large datasets
 can retain compact external links:

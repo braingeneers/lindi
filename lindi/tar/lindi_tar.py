@@ -1,8 +1,10 @@
 import os
 import json
-import random
+import secrets
+import string
 import urllib.request
 from .create_tar_header import create_tar_header
+from ..remote_reading import DEFAULT_REMOTE_REQUEST_TIMEOUT_SECONDS
 
 
 TAR_ENTRY_JSON_SIZE = 1024
@@ -403,18 +405,26 @@ class LindiTarFile:
 
 
 def _download_file_byte_range(url: str, start: int, end: int) -> bytes:
+    if not url.startswith(("http://", "https://")):
+        raise ValueError(f"Unsupported remote URL scheme: {url}")
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3",
         "Range": f"bytes={start}-{end - 1}"
     }
     req = urllib.request.Request(url, headers=headers)
-    with urllib.request.urlopen(req) as response:
+    # The scheme is restricted above.
+    with urllib.request.urlopen(  # nosec B310
+        req, timeout=DEFAULT_REMOTE_REQUEST_TIMEOUT_SECONDS
+    ) as response:
         return response.read()
 
 
 def _load_all_bytes_from_local_or_remote_file(path_or_url: str) -> bytes:
     if path_or_url.startswith("http://") or path_or_url.startswith("https://"):
-        with urllib.request.urlopen(path_or_url) as response:
+        # This branch restricts the scheme.
+        with urllib.request.urlopen(  # nosec B310
+            path_or_url, timeout=DEFAULT_REMOTE_REQUEST_TIMEOUT_SECONDS
+        ) as response:
             return response.read()
     else:
         with open(path_or_url, "rb") as f:
@@ -469,4 +479,4 @@ def _fix_checksum_in_header(f, header_start_byte):
 
 
 def _create_random_string():
-    return "".join(random.choices("abcdefghijklmnopqrstuvwxyz", k=10))
+    return "".join(secrets.choice(string.ascii_lowercase) for _ in range(10))

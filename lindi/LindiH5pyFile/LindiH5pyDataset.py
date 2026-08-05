@@ -6,6 +6,11 @@ import zarr
 from .LindiH5pyAttributes import LindiH5pyAttributes
 from .LindiH5pyReference import LindiH5pyReference
 from ..LindiRemfile.LindiRemfile import LindiRemfile
+from ..remote_diagnostics import (
+    abort_remote_read_query,
+    complete_remote_read_query,
+    start_remote_read_query,
+)
 
 from ..conversion.decode_references import decode_references
 
@@ -177,7 +182,25 @@ class LindiH5pyDataset(h5py.Dataset):
     def __getitem__(self, args, new_dtype=None):
         if new_dtype is not None:
             raise Exception("new_dtype is not supported for zarr.Array")
-        return self._get_item_for_zarr(self._zarr_array, args)
+        options = self._file._remote_read_options
+        if options is None:
+            return self._get_item_for_zarr(self._zarr_array, args)
+        token, capture = start_remote_read_query(options)
+        try:
+            result = self._get_item_for_zarr(self._zarr_array, args)
+        except Exception:
+            abort_remote_read_query(token)
+            raise
+        complete_remote_read_query(
+            token,
+            capture,
+            dataset_path=self.name,
+            zarr_array=self._zarr_array,
+            result=result,
+            warned_categories=self._file._remote_efficiency_warned_categories,
+            warning_lock=self._file._remote_efficiency_warning_lock,
+        )
+        return result
 
     def __array__(self, dtype=None, copy=None):
         """Materialize through LINDI rather than h5py's low-level dataset ID."""
@@ -235,7 +258,7 @@ class LindiH5pyDataset(h5py.Dataset):
             # For some reason, with the newest version of zarr (2.18.0) we need to use [:][0] rather than just [0].
             # Otherwise we get an error "ValueError: buffer source array is read-only"
             return zarr_array[:][0]
-        return decode_references(zarr_array[selection])
+        return decode_references(_read_zarr_selection(zarr_array, selection))
 
     def _get_external_hdf5_client(self, url: str) -> h5py.File:
         if url not in _external_hdf5_clients:
@@ -260,6 +283,55 @@ class LindiH5pyDataset(h5py.Dataset):
             raise ValueError("Cannot set items on read-only object")
         assert self._writer is not None
         self._writer.__setitem__(args, val)
+
+
+def _read_zarr_selection(zarr_array: zarr.Array, selection: Any):
+    """Avoid a Zarr 2.18.2 integer-indexing bug on unit-width chunks."""
+    original_selection = selection
+    if not isinstance(selection, tuple):
+        selection = (selection,)
+    if any(x is None for x in selection):
+        return zarr_array[original_selection]
+    if sum(x is Ellipsis for x in selection) > 1:
+        return zarr_array[original_selection]
+
+    explicit_axis_count = sum(x is not Ellipsis for x in selection)
+    missing_axis_count = zarr_array.ndim - explicit_axis_count
+    if missing_axis_count < 0:
+        return zarr_array[original_selection]
+    expanded_selection = []
+    for index in selection:
+        if index is Ellipsis:
+            expanded_selection.extend([slice(None)] * missing_axis_count)
+        else:
+            expanded_selection.append(index)
+    if not any(x is Ellipsis for x in selection):
+        expanded_selection.extend([slice(None)] * missing_axis_count)
+
+    integer_axes = [
+        axis
+        for axis, index in enumerate(expanded_selection)
+        if isinstance(index, (int, np.integer)) and not isinstance(index, (bool, np.bool_))
+    ]
+    if not integer_axes or not any(
+        zarr_array.chunks[axis] == 1 for axis in integer_axes
+    ):
+        return zarr_array[original_selection]
+
+    normalized_selection = list(expanded_selection)
+    for axis in integer_axes:
+        index = int(normalized_selection[axis])
+        if index < 0:
+            index += zarr_array.shape[axis]
+        if index < 0 or index >= zarr_array.shape[axis]:
+            return zarr_array[original_selection]
+        normalized_selection[axis] = slice(index, index + 1)
+    result = np.squeeze(
+        zarr_array[tuple(normalized_selection)], axis=tuple(integer_axes)
+    )
+    # Match Zarr's native integer-indexing contract. In particular, callers such
+    # as HDMF distinguish NumPy scalars from zero-dimensional ndarrays.
+    return result[()] if result.ndim == 0 else result
 
 
 class LindiH5pyDatasetCompoundFieldSelection:
