@@ -10,58 +10,58 @@ from typing import Any, List, Sequence, Set, Tuple, Union
 
 import numpy as np
 
-from .remote_reading import (
+from .range_reading import (
     ByteRange,
-    LindiRemoteEfficiencyWarning,
-    LindiRemoteLayoutError,
-    LindiRemoteLayoutWarning,
-    LindiRemoteReadMetrics,
-    LindiRemoteReadOptions,
+    LindiRangeEfficiencyWarning,
+    LindiRangeLayoutError,
+    LindiRangeLayoutWarning,
+    LindiRangeReadMetrics,
+    LindiRangeReadOptions,
     plan_byte_range_requests,
 )
 
 
 @dataclass
-class _RemoteReadQueryCapture:
-    options: LindiRemoteReadOptions
+class _RangeReadQueryCapture:
+    options: LindiRangeReadOptions
     started: float
-    metrics: List[LindiRemoteReadMetrics] = field(default_factory=list)
-    remote_keys: Set[str] = field(default_factory=set)
+    metrics: List[LindiRangeReadMetrics] = field(default_factory=list)
+    range_keys: Set[str] = field(default_factory=set)
 
 
-_active_remote_read_query = contextvars.ContextVar(
-    "lindi_active_remote_read_query", default=None
+_active_range_read_query = contextvars.ContextVar(
+    "lindi_active_range_read_query", default=None
 )
 _lindi_package_directory = os.path.dirname(os.path.abspath(__file__))
 
 
-def start_remote_read_query(options: LindiRemoteReadOptions):
-    capture = _RemoteReadQueryCapture(options=options, started=time.perf_counter())
-    token = _active_remote_read_query.set(capture)
+def start_range_read_query(options: LindiRangeReadOptions):
+    capture = _RangeReadQueryCapture(options=options, started=time.perf_counter())
+    token = _active_range_read_query.set(capture)
     return token, capture
 
 
-def abort_remote_read_query(token) -> None:
-    _active_remote_read_query.reset(token)
+def abort_range_read_query(token) -> None:
+    _active_range_read_query.reset(token)
 
 
-def capture_remote_read_metrics(
-    metrics: LindiRemoteReadMetrics,
+def capture_range_read_metrics(
+    metrics: LindiRangeReadMetrics,
     *,
-    options: LindiRemoteReadOptions,
-    remote_keys: Sequence[str],
+    options: LindiRangeReadOptions,
+    range_keys: Sequence[str],
 ) -> bool:
-    capture = _active_remote_read_query.get()
+    capture = _active_range_read_query.get()
     if capture is None or capture.options is not options:
         return False
     capture.metrics.append(metrics)
-    capture.remote_keys.update(remote_keys)
+    capture.range_keys.update(range_keys)
     return True
 
 
-def complete_remote_read_query(
+def complete_range_read_query(
     token,
-    capture: _RemoteReadQueryCapture,
+    capture: _RangeReadQueryCapture,
     *,
     dataset_path: str,
     zarr_array: Any,
@@ -69,14 +69,14 @@ def complete_remote_read_query(
     warned_categories: Set[Tuple[str, str]],
     warning_lock: threading.Lock,
 ) -> None:
-    _active_remote_read_query.reset(token)
+    _active_range_read_query.reset(token)
     if not capture.metrics:
         return
 
     logical_bytes = _logical_result_bytes(result)
     dataset_logical_bytes = _logical_dataset_bytes(zarr_array)
-    decoded_chunk_bytes = _decoded_remote_chunk_bytes(
-        zarr_array, capture.remote_keys
+    decoded_chunk_bytes = _decoded_range_chunk_bytes(
+        zarr_array, capture.range_keys
     )
     chunk_amplification_ratio = None
     if logical_bytes and decoded_chunk_bytes is not None:
@@ -88,23 +88,31 @@ def complete_remote_read_query(
     if requested_bytes:
         transport_overread_ratio = fetched_bytes / requested_bytes
 
-    metrics = LindiRemoteReadMetrics(
+    metrics = LindiRangeReadMetrics(
         optimized=all(x.optimized for x in capture.metrics),
         requested_key_count=sum(x.requested_key_count for x in capture.metrics),
         returned_key_count=sum(x.returned_key_count for x in capture.metrics),
         inline_value_count=sum(x.inline_value_count for x in capture.metrics),
-        local_file_read_count=sum(x.local_file_read_count for x in capture.metrics),
-        remote_reference_count=sum(x.remote_reference_count for x in capture.metrics),
+        range_reference_count=sum(x.range_reference_count for x in capture.metrics),
+        high_latency_reference_count=sum(
+            x.high_latency_reference_count for x in capture.metrics
+        ),
         cache_hit_count=sum(x.cache_hit_count for x in capture.metrics),
         source_range_count=sum(x.source_range_count for x in capture.metrics),
         planned_request_count=sum(x.planned_request_count for x in capture.metrics),
-        range_get_count=sum(x.range_get_count for x in capture.metrics),
+        read_attempt_count=sum(x.read_attempt_count for x in capture.metrics),
         requested_bytes=requested_bytes,
         fetched_bytes=fetched_bytes,
         overread_bytes=sum(x.overread_bytes for x in capture.metrics),
         elapsed_seconds=sum(x.elapsed_seconds for x in capture.metrics),
         referenced_bytes=sum(x.referenced_bytes for x in capture.metrics),
         cache_hit_bytes=sum(x.cache_hit_bytes for x in capture.metrics),
+        transport_attempt_counts=_sum_transport_counters(
+            x.transport_attempt_counts for x in capture.metrics
+        ),
+        transport_fetched_bytes=_sum_transport_counters(
+            x.transport_fetched_bytes for x in capture.metrics
+        ),
         dataset_path=dataset_path,
         logical_bytes=logical_bytes,
         decoded_chunk_bytes=decoded_chunk_bytes,
@@ -143,15 +151,25 @@ def _logical_dataset_bytes(zarr_array: Any) -> Union[int, None]:
     return int(element_count * dtype.itemsize)
 
 
-def _decoded_remote_chunk_bytes(
-    zarr_array: Any, remote_keys: Set[str]
+def _sum_transport_counters(
+    values: Sequence[Tuple[Tuple[str, int], ...]],
+) -> Tuple[Tuple[str, int], ...]:
+    totals = {}
+    for counters in values:
+        for name, count in counters:
+            totals[name] = totals.get(name, 0) + count
+    return tuple(sorted(totals.items()))
+
+
+def _decoded_range_chunk_bytes(
+    zarr_array: Any, range_keys: Set[str]
 ) -> Union[int, None]:
     dtype = zarr_array.dtype
     if dtype.hasobject or dtype.itemsize <= 0 or zarr_array.ndim == 0:
         return None
     prefix = zarr_array.name.strip("/")
     chunk_keys = set()
-    for key in remote_keys:
+    for key in range_keys:
         if prefix:
             prefix_with_separator = prefix + "/"
             if not key.startswith(prefix_with_separator):
@@ -178,15 +196,15 @@ def _decoded_remote_chunk_bytes(
 
 
 def _warn_for_query_inefficiency(
-    metrics: LindiRemoteReadMetrics,
-    options: LindiRemoteReadOptions,
+    metrics: LindiRangeReadMetrics,
+    options: LindiRangeReadOptions,
     *,
     warned_categories: Set[Tuple[str, str]],
     warning_lock: threading.Lock,
 ) -> None:
     if options.runtime_efficiency_check == "ignore":
         return
-    if metrics.remote_reference_count == 0 or metrics.dataset_path is None:
+    if metrics.high_latency_reference_count == 0 or metrics.dataset_path is None:
         return
     thresholds = options.efficiency_warning_thresholds
     problems: List[Tuple[str, str]] = []
@@ -236,16 +254,16 @@ def _warn_for_query_inefficiency(
                 new_problems.append(detail)
     if new_problems:
         _warn_at_user_callsite(
-            f"Inefficient remote read from {metrics.dataset_path}: "
+            f"Inefficient high-latency range read from {metrics.dataset_path}: "
             + "; ".join(new_problems)
             + ". Consider changing the dataset chunk layout or selection pattern.",
-            LindiRemoteEfficiencyWarning,
+            LindiRangeEfficiencyWarning,
         )
 
 
 def validate_nwb_electrical_series_layout(store: Any) -> None:
-    """Validate remote NWB ElectricalSeries references without fetching data."""
-    options = store.remote_read_options
+    """Validate high-latency NWB references without fetching data."""
+    options = store.range_read_options
     if not options.enabled or options.layout_check == "ignore":
         return
     refs = store.rfs["refs"]
@@ -272,7 +290,7 @@ def validate_nwb_electrical_series_layout(store: Any) -> None:
         external_link = data_attrs.get("_EXTERNAL_ARRAY_LINK")
         if isinstance(external_link, dict):
             url = external_link.get("url")
-            if isinstance(url, str) and url.startswith(("http://", "https://")):
+            if isinstance(url, str) and _is_high_latency_source(store, url):
                 issues.append(
                     f"{data_path} uses _EXTERNAL_ARRAY_LINK, so explicit range "
                     "planning and layout validation are unavailable"
@@ -297,7 +315,7 @@ def validate_nwb_electrical_series_layout(store: Any) -> None:
             continue
         remaining_reference_checks -= required_checks
         dimension_separator = zarray.get("dimension_separator", ".")
-        remote_reference_count = 0
+        high_latency_reference_count = 0
         fragmented_channel_count = 0
         maximum_run_count = 1
         for channel_chunk in range(channel_chunk_count):
@@ -313,9 +331,13 @@ def validate_nwb_electrical_series_layout(store: Any) -> None:
                     reference = store._resolve_reference(key)
                 except KeyError:
                     continue
-                if not reference.is_remote or reference.length == 0:
+                if (
+                    reference.url_or_path is None
+                    or reference.length == 0
+                    or not _is_high_latency_source(store, reference.url_or_path)
+                ):
                     continue
-                remote_reference_count += 1
+                high_latency_reference_count += 1
                 channel_ranges.append(ByteRange(
                     key=key,
                     source=reference.url_or_path,
@@ -328,7 +350,7 @@ def validate_nwb_electrical_series_layout(store: Any) -> None:
                     fragmented_channel_count += 1
                     maximum_run_count = max(maximum_run_count, run_count)
 
-        if remote_reference_count == 0:
+        if high_latency_reference_count == 0:
             continue
         channels_per_chunk = min(chunks[1], shape[1])
         if channels_per_chunk != 1:
@@ -346,15 +368,20 @@ def validate_nwb_electrical_series_layout(store: Any) -> None:
     if not issues:
         return
     message = (
-        "Remote NWB layout check found inefficient ElectricalSeries data: "
+        "High-latency NWB layout check found inefficient ElectricalSeries data: "
         + "; ".join(issues)
         + ". Repack the source into time-by-one-channel chunks stored channel-major "
         "and regenerate the LINDI sidecar with explicit chunk references. Set "
         "layout_check='ignore' only when this behavior is intentional."
     )
     if options.layout_check == "error":
-        raise LindiRemoteLayoutError(message)
-    _warn_at_user_callsite(message, LindiRemoteLayoutWarning)
+        raise LindiRangeLayoutError(message)
+    _warn_at_user_callsite(message, LindiRangeLayoutWarning)
+
+
+def _is_high_latency_source(store: Any, source: str) -> bool:
+    transport = store._range_transport_manager.resolve(source)
+    return transport.capabilities.high_latency
 
 
 def _valid_two_dimensional_layout(shape: Any, chunks: Any) -> bool:

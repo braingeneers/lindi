@@ -5,19 +5,20 @@ import json
 import time
 import base64
 import numpy as np
-import requests
 from zarr.storage import Store as ZarrStore
 
 from ..LocalCache.LocalCache import ChunkTooLargeError, LocalCache
-from ..remote_reading import (
+from ..range_reading import (
     ByteRange,
-    DEFAULT_REMOTE_REQUEST_TIMEOUT_SECONDS,
-    LindiRemoteReadMetrics,
-    LindiRemoteReadOptions,
+    LindiRangeReadOptions,
+    LindiRangeReadMetrics,
+    PlannedByteRangeRequest,
+    RangeTransportFactory,
+    _RangeTransportManager,
     fetch_byte_range_requests,
     plan_byte_range_requests,
 )
-from ..remote_diagnostics import capture_remote_read_metrics
+from ..range_diagnostics import capture_range_read_metrics
 from ..tar.lindi_tar import LindiTarFile
 
 
@@ -32,13 +33,6 @@ class _ResolvedReference:
     @property
     def is_inline(self) -> bool:
         return self.data is not None
-
-    @property
-    def is_remote(self) -> bool:
-        return self.url_or_path is not None and (
-            self.url_or_path.startswith("http://")
-            or self.url_or_path.startswith("https://")
-        )
 
 
 class LindiReferenceFileSystemStore(ZarrStore):
@@ -108,7 +102,10 @@ class LindiReferenceFileSystemStore(ZarrStore):
             *,
             mode: Literal["r", "r+"] = "r+",
             local_cache: Union[LocalCache, None] = None,
-            remote_read_options: Union[LindiRemoteReadOptions, None] = None,
+            range_read_options: Union[LindiRangeReadOptions, None] = None,
+            range_transports: Union[
+                Mapping[str, RangeTransportFactory], None
+            ] = None,
             _source_url_or_path: Union[str, None] = None,
             _source_tar_file: Union[LindiTarFile, None] = None
     ):
@@ -124,7 +121,7 @@ class LindiReferenceFileSystemStore(ZarrStore):
         local_cache : LocalCache, optional
             The local cache to use for caching data chunks read from the
             remote URLs. If None, no caching is done.
-        remote_read_options : LindiRemoteReadOptions, optional
+        range_read_options : LindiRangeReadOptions, optional
             Coalescing, concurrency, retry, and instrumentation options for
             remote chunk references.
         """
@@ -159,7 +156,8 @@ class LindiReferenceFileSystemStore(ZarrStore):
         self.rfs = rfs
         self.mode = mode
         self.local_cache = local_cache
-        self.remote_read_options = remote_read_options or LindiRemoteReadOptions()
+        self.range_read_options = range_read_options or LindiRangeReadOptions()
+        self._range_transport_manager = _RangeTransportManager(range_transports)
         self._source_url_or_path = _source_url_or_path
         self._source_tar_file = _source_tar_file
 
@@ -239,7 +237,9 @@ class LindiReferenceFileSystemStore(ZarrStore):
     def _read_resolved_reference(self, reference: _ResolvedReference) -> bytes:
         if reference.url_or_path is None:
             raise ValueError("Resolved byte reference has no URL or path")
-        if reference.is_remote and self.local_cache is not None:
+        transport = self._range_transport_manager.resolve(reference.url_or_path)
+        cacheable = transport.capabilities.cacheable
+        if cacheable and self.local_cache is not None:
             cached = self.local_cache.get_remote_chunk(
                 url=reference.url_or_path,
                 offset=reference.offset,
@@ -247,10 +247,29 @@ class LindiReferenceFileSystemStore(ZarrStore):
             )
             if cached is not None:
                 return cached
-        data = _read_bytes_from_url_or_path(
-            reference.url_or_path, reference.offset, reference.length
+        if reference.length == 0:
+            return b""
+        byte_range = ByteRange(
+            key=reference.key,
+            source=reference.url_or_path,
+            offset=reference.offset,
+            length=reference.length,
         )
-        if reference.is_remote:
+        request = PlannedByteRangeRequest(
+            source=byte_range.source,
+            offset=byte_range.offset,
+            length=byte_range.length,
+            ranges=(byte_range,),
+            requested_bytes=byte_range.length,
+            overread_bytes=0,
+        )
+        fetched = fetch_byte_range_requests(
+            [request],
+            self.range_read_options,
+            _transport_manager=self._range_transport_manager,
+        )
+        data = fetched[0].data
+        if cacheable:
             self._put_in_local_cache(reference, data)
         return data
 
@@ -258,6 +277,9 @@ class LindiReferenceFileSystemStore(ZarrStore):
         self, reference: _ResolvedReference, data: bytes
     ) -> None:
         if self.local_cache is None or reference.url_or_path is None:
+            return
+        transport = self._range_transport_manager.resolve(reference.url_or_path)
+        if not transport.capabilities.cacheable:
             return
         try:
             self.local_cache.put_remote_chunk(
@@ -284,14 +306,14 @@ class LindiReferenceFileSystemStore(ZarrStore):
         unique_keys = list(dict.fromkeys(keys))
         results: Dict[str, bytes] = {}
         references_by_key: Dict[str, _ResolvedReference] = {}
-        remote_ranges = []
+        source_ranges = []
         inline_value_count = 0
-        local_file_read_count = 0
-        remote_reference_count = 0
+        range_reference_count = 0
+        high_latency_reference_count = 0
         cache_hit_count = 0
         referenced_bytes = 0
         cache_hit_bytes = 0
-        remote_keys = set()
+        high_latency_keys = set()
 
         for key in unique_keys:
             try:
@@ -305,17 +327,14 @@ class LindiReferenceFileSystemStore(ZarrStore):
                 continue
             if reference.url_or_path is None:
                 raise ValueError("Resolved byte reference has no URL or path")
-            if not reference.is_remote:
-                results[key] = _read_bytes_from_url_or_path(
-                    reference.url_or_path, reference.offset, reference.length
-                )
-                local_file_read_count += 1
-                continue
-
-            remote_reference_count += 1
+            transport = self._range_transport_manager.resolve(reference.url_or_path)
+            capabilities = transport.capabilities
+            range_reference_count += 1
             referenced_bytes += reference.length
-            remote_keys.add(key)
-            if self.local_cache is not None:
+            if capabilities.high_latency:
+                high_latency_reference_count += 1
+                high_latency_keys.add(key)
+            if capabilities.cacheable and self.local_cache is not None:
                 cached = self.local_cache.get_remote_chunk(
                     url=reference.url_or_path,
                     offset=reference.offset,
@@ -330,7 +349,7 @@ class LindiReferenceFileSystemStore(ZarrStore):
                 results[key] = b""
                 continue
             references_by_key[key] = reference
-            remote_ranges.append(
+            source_ranges.append(
                 ByteRange(
                     key=key,
                     source=reference.url_or_path,
@@ -340,10 +359,12 @@ class LindiReferenceFileSystemStore(ZarrStore):
             )
 
         planned_requests = plan_byte_range_requests(
-            remote_ranges, self.remote_read_options
+            source_ranges, self.range_read_options
         )
         fetched_requests = fetch_byte_range_requests(
-            planned_requests, self.remote_read_options
+            planned_requests,
+            self.range_read_options,
+            _transport_manager=self._range_transport_manager,
         )
         for fetched in fetched_requests:
             request = fetched.request
@@ -366,32 +387,48 @@ class LindiReferenceFileSystemStore(ZarrStore):
             if padded_size is not None:
                 results[key] = _pad_chunk(value, padded_size)
 
-        metrics = LindiRemoteReadMetrics(
-            optimized=self.remote_read_options.enabled,
+        transport_attempt_counts: Dict[str, int] = {}
+        transport_fetched_bytes: Dict[str, int] = {}
+        for fetched in fetched_requests:
+            transport_attempt_counts[fetched.transport_name] = (
+                transport_attempt_counts.get(fetched.transport_name, 0)
+                + fetched.attempt_count
+            )
+            transport_fetched_bytes[fetched.transport_name] = (
+                transport_fetched_bytes.get(fetched.transport_name, 0)
+                + fetched.fetched_bytes
+            )
+        metrics = LindiRangeReadMetrics(
+            optimized=self.range_read_options.enabled,
             requested_key_count=len(unique_keys),
             returned_key_count=len(results),
             inline_value_count=inline_value_count,
-            local_file_read_count=local_file_read_count,
-            remote_reference_count=remote_reference_count,
+            range_reference_count=range_reference_count,
+            high_latency_reference_count=high_latency_reference_count,
             cache_hit_count=cache_hit_count,
-            source_range_count=len(remote_ranges),
+            source_range_count=len(source_ranges),
             planned_request_count=len(planned_requests),
-            range_get_count=sum(x.attempt_count for x in fetched_requests),
+            read_attempt_count=sum(x.attempt_count for x in fetched_requests),
             requested_bytes=sum(x.requested_bytes for x in planned_requests),
-            fetched_bytes=sum(len(x.data) for x in fetched_requests),
+            fetched_bytes=sum(x.fetched_bytes for x in fetched_requests),
             overread_bytes=sum(x.overread_bytes for x in planned_requests),
             elapsed_seconds=time.perf_counter() - started,
             referenced_bytes=referenced_bytes,
             cache_hit_bytes=cache_hit_bytes,
+            transport_attempt_counts=tuple(sorted(transport_attempt_counts.items())),
+            transport_fetched_bytes=tuple(sorted(transport_fetched_bytes.items())),
         )
-        captured = capture_remote_read_metrics(
+        captured = capture_range_read_metrics(
             metrics,
-            options=self.remote_read_options,
-            remote_keys=tuple(remote_keys.intersection(results)),
+            options=self.range_read_options,
+            range_keys=tuple(high_latency_keys.intersection(results)),
         )
-        if not captured and self.remote_read_options.metrics_callback is not None:
-            self.remote_read_options.metrics_callback(metrics)
+        if not captured and self.range_read_options.metrics_callback is not None:
+            self.range_read_options.metrics_callback(metrics)
         return results
+
+    def close(self) -> None:
+        self._range_transport_manager.close()
 
     def __setitem__(self, key: str, value: bytes):
         # We intentionally do not allow value to be a dict here! When the rfs is
@@ -493,44 +530,6 @@ class LindiReferenceFileSystemStore(ZarrStore):
                     if template_name in templates0:
                         v[0] = templates0[template_name]
         rfs['templates'] = {}
-
-
-def _read_bytes_from_url_or_path(url_or_path: str, offset: int, length: int):
-    """
-    Read a range of bytes from a URL.
-    """
-    from ..LindiRemfile.LindiRemfile import _resolve_url
-    if url_or_path.startswith('http://') or url_or_path.startswith('https://'):
-        num_retries = 8
-        for try_num in range(num_retries):
-            try:
-                url_resolved = _resolve_url(url_or_path)  # handle DANDI auth
-                range_start = offset
-                range_end = offset + length - 1
-                range_header = f"bytes={range_start}-{range_end}"
-                headers = {
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3",
-                    "Range": range_header
-                }
-                response = requests.get(
-                    url_resolved,
-                    headers=headers,
-                    timeout=DEFAULT_REMOTE_REQUEST_TIMEOUT_SECONDS,
-                )
-                response.raise_for_status()
-                return response.content
-            except Exception as e:
-                if try_num == num_retries - 1:
-                    raise e
-                else:
-                    delay = 0.1 * 2 ** try_num
-                    print(f'Retry load data from {url_or_path} in {delay} seconds')
-                    time.sleep(delay)
-        raise Exception(f"Failed to load data from {url_or_path}")
-    else:
-        with open(url_or_path, 'rb') as f:
-            f.seek(offset)
-            return f.read(length)
 
 
 def _is_chunk_base_key(base_key: str) -> bool:

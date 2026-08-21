@@ -1,4 +1,6 @@
-from typing import TYPE_CHECKING, Any, Dict
+from typing import TYPE_CHECKING, Any
+from urllib.parse import unquote, urlsplit
+from urllib.request import url2pathname
 import numpy as np
 import h5py
 import zarr
@@ -6,10 +8,10 @@ import zarr
 from .LindiH5pyAttributes import LindiH5pyAttributes
 from .LindiH5pyReference import LindiH5pyReference
 from ..LindiRemfile.LindiRemfile import LindiRemfile
-from ..remote_diagnostics import (
-    abort_remote_read_query,
-    complete_remote_read_query,
-    start_remote_read_query,
+from ..range_diagnostics import (
+    abort_range_read_query,
+    complete_range_read_query,
+    start_range_read_query,
 )
 
 from ..conversion.decode_references import decode_references
@@ -17,13 +19,6 @@ from ..conversion.decode_references import decode_references
 
 if TYPE_CHECKING:
     from .LindiH5pyFile import LindiH5pyFile  # pragma: no cover
-
-
-# This is a global list of external hdf5 clients, which are used by
-# possibly multiple LindiH5pyFile objects. The key is the URL of the
-# external hdf5 file, and the value is the h5py.File object.
-# TODO: figure out how to close these clients
-_external_hdf5_clients: Dict[str, h5py.File] = {}
 
 
 class LindiH5pyDataset(h5py.Dataset):
@@ -182,23 +177,23 @@ class LindiH5pyDataset(h5py.Dataset):
     def __getitem__(self, args, new_dtype=None):
         if new_dtype is not None:
             raise Exception("new_dtype is not supported for zarr.Array")
-        options = self._file._remote_read_options
+        options = self._file._range_read_options
         if options is None:
             return self._get_item_for_zarr(self._zarr_array, args)
-        token, capture = start_remote_read_query(options)
+        token, capture = start_range_read_query(options)
         try:
             result = self._get_item_for_zarr(self._zarr_array, args)
         except Exception:
-            abort_remote_read_query(token)
+            abort_range_read_query(token)
             raise
-        complete_remote_read_query(
+        complete_range_read_query(
             token,
             capture,
             dataset_path=self.name,
             zarr_array=self._zarr_array,
             result=result,
-            warned_categories=self._file._remote_efficiency_warned_categories,
-            warning_lock=self._file._remote_efficiency_warning_lock,
+            warned_categories=self._file._range_efficiency_warned_categories,
+            warning_lock=self._file._range_efficiency_warning_lock,
         )
         return result
 
@@ -245,10 +240,22 @@ class LindiH5pyDataset(h5py.Dataset):
                     dataset=self, ind=ind, dtype=dtype
                 )
                 return ret
-            else:
-                raise TypeError(
-                    f"Compound dataset {self.name} does not support selection with {selection}"
-                )
+            compound_array = np.empty(zarr_array.shape, dtype=self._compound_dtype)
+            encoded_array = zarr_array[:]
+            for field_index, field_name in enumerate(self._compound_dtype.names):
+                field_dtype = self._compound_dtype.fields[field_name][0]
+                values = [value[field_index] for value in encoded_array.flat]
+                if h5py.check_dtype(ref=field_dtype) is not None:
+                    values = [
+                        LindiH5pyReference(value['_REFERENCE'])
+                        if isinstance(value, dict) and '_REFERENCE' in value
+                        else value
+                        for value in values
+                    ]
+                compound_array[field_name] = np.asarray(
+                    values, dtype=field_dtype
+                ).reshape(zarr_array.shape)
+            return decode_references(compound_array[selection])
 
         # We use zarr's slicing, except in the case of a scalar dataset
         if self.ndim == 0:
@@ -261,13 +268,25 @@ class LindiH5pyDataset(h5py.Dataset):
         return decode_references(_read_zarr_selection(zarr_array, selection))
 
     def _get_external_hdf5_client(self, url: str) -> h5py.File:
-        if url not in _external_hdf5_clients:
+        clients = self._file._external_hdf5_clients
+        if url not in clients:
             if url.startswith("http://") or url.startswith("https://"):
                 ff = LindiRemfile(url, local_cache=self._file._local_cache)
+            elif url.startswith("file://"):
+                parsed = urlsplit(url)
+                if parsed.hostname not in (None, "", "localhost"):
+                    raise ValueError(
+                        f"Remote file URI authorities are not supported: {url}"
+                    )
+                if parsed.query or parsed.fragment:
+                    raise ValueError(
+                        f"File URI queries and fragments are not supported: {url}"
+                    )
+                ff = open(url2pathname(unquote(parsed.path)), "rb")
             else:
-                ff = open(url, "rb")  # this never gets closed
-            _external_hdf5_clients[url] = h5py.File(ff, "r")
-        return _external_hdf5_clients[url]
+                ff = open(url, "rb")
+            clients[url] = (h5py.File(ff, "r"), ff)
+        return clients[url][0]
 
     @property
     def ref(self):
@@ -388,7 +407,7 @@ class LindiH5pyDatasetCompoundFieldSelection:
 
     @property
     def dtype(self):
-        self._dtype
+        return self._dtype
 
     @property
     def size(self):

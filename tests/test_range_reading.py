@@ -20,10 +20,10 @@ import pytest
 import requests
 
 import lindi
-from lindi.remote_reading import (
+from lindi.range_reading import (
     ByteRange,
     PlannedByteRangeRequest,
-    RemoteRangeReadError,
+    RangeReadError,
     _parse_retry_after_seconds,
     fetch_byte_range_requests,
     plan_byte_range_requests,
@@ -201,7 +201,7 @@ def _open_remote_dataset(server, data, *, options, **rfs_kwargs):
     )
     server.data = object_data
     client = lindi.LindiH5pyFile.from_reference_file_system(
-        rfs, remote_read_options=options
+        rfs, range_read_options=options
     )
     return client, client["data"]
 
@@ -213,7 +213,7 @@ def test_range_planner_coalesces_with_bounded_overread():
         ByteRange("c", "u1", 32, 10),
         ByteRange("d", "u2", 0, 10),
     ]
-    options = lindi.LindiRemoteReadOptions(
+    options = lindi.LindiRangeReadOptions(
         max_gap_bytes=10,
         max_overread_bytes=10,
         max_request_bytes=None,
@@ -235,7 +235,7 @@ def test_range_planner_handles_overlap_size_limit_and_disabled_mode():
     ]
     planned = plan_byte_range_requests(
         ranges,
-        lindi.LindiRemoteReadOptions(
+        lindi.LindiRangeReadOptions(
             max_gap_bytes=0,
             max_overread_bytes=0,
             max_request_bytes=20,
@@ -246,7 +246,7 @@ def test_range_planner_handles_overlap_size_limit_and_disabled_mode():
         (15, 10, 10),
     ]
     baseline = plan_byte_range_requests(
-        ranges, lindi.LindiRemoteReadOptions(enabled=False)
+        ranges, lindi.LindiRangeReadOptions(enabled=False)
     )
     assert len(baseline) == 3
     assert all(len(x.ranges) == 1 for x in baseline)
@@ -277,15 +277,15 @@ def test_byte_range_validation():
         {"runtime_efficiency_check": "invalid"},
     ],
 )
-def test_remote_read_options_validation(kwargs):
+def test_range_read_options_validation(kwargs):
     with pytest.raises(ValueError):
-        lindi.LindiRemoteReadOptions(**kwargs)
+        lindi.LindiRangeReadOptions(**kwargs)
 
 
 def test_contiguous_selection_uses_one_range_get():
     data = np.arange(8 * 8, dtype=np.int32).reshape(8, 8)
     metrics = []
-    options = lindi.LindiRemoteReadOptions(metrics_callback=metrics.append)
+    options = lindi.LindiRangeReadOptions(metrics_callback=metrics.append)
     with _RangeServer() as server:
         client, dataset = _open_remote_dataset(server, data, options=options)
         server.reset_observations()
@@ -293,7 +293,7 @@ def test_contiguous_selection_uses_one_range_get():
         assert np.array_equal(actual, data[0:4, :])
         assert len(server.requests) == 1
         assert metrics[-1].planned_request_count == 1
-        assert metrics[-1].range_get_count == 1
+        assert metrics[-1].read_attempt_count == 1
         assert metrics[-1].overread_bytes == 0
         assert metrics[-1].requested_bytes == metrics[-1].fetched_bytes
         assert asdict(metrics[-1])["returned_key_count"] == 4
@@ -303,7 +303,7 @@ def test_contiguous_selection_uses_one_range_get():
 def test_discontiguous_channel_runs_are_fetched_concurrently():
     data = np.arange(8 * 8, dtype=np.int16).reshape(8, 8)
     metrics = []
-    options = lindi.LindiRemoteReadOptions(
+    options = lindi.LindiRangeReadOptions(
         max_concurrency=4, metrics_callback=metrics.append
     )
     with _RangeServer(delay_seconds=0.1) as server:
@@ -321,7 +321,7 @@ def test_discontiguous_channel_runs_are_fetched_concurrently():
 def test_concurrency_is_bounded_when_runs_exceed_worker_count():
     data = np.arange(4 * 8, dtype=np.int16).reshape(4, 8)
     metrics = []
-    options = lindi.LindiRemoteReadOptions(
+    options = lindi.LindiRangeReadOptions(
         max_concurrency=2, metrics_callback=metrics.append
     )
     with _RangeServer(delay_seconds=0.05) as server:
@@ -340,7 +340,7 @@ def test_concurrency_is_bounded_when_runs_exceed_worker_count():
 def test_nearby_ranges_respect_gap_and_cumulative_overread_limits():
     data = np.arange(8 * 8, dtype=np.int32).reshape(8, 8)
     metrics = []
-    options = lindi.LindiRemoteReadOptions(
+    options = lindi.LindiRangeReadOptions(
         max_gap_bytes=7,
         max_overread_bytes=13,
         max_request_bytes=None,
@@ -362,7 +362,7 @@ def test_nearby_ranges_respect_gap_and_cumulative_overread_limits():
 def test_disabled_reader_provides_instrumented_sequential_baseline():
     data = np.arange(8 * 8, dtype=np.int32).reshape(8, 8)
     metrics = []
-    options = lindi.LindiRemoteReadOptions(
+    options = lindi.LindiRangeReadOptions(
         enabled=False, max_concurrency=8, metrics_callback=metrics.append
     )
     with _RangeServer(delay_seconds=0.02) as server:
@@ -381,12 +381,12 @@ def test_local_cache_stores_exact_chunks_after_coalesced_fetch():
     metrics = []
     with tempfile.TemporaryDirectory() as tmpdir:
         cache = lindi.LocalCache(cache_dir=tmpdir)
-        options = lindi.LindiRemoteReadOptions(metrics_callback=metrics.append)
+        options = lindi.LindiRangeReadOptions(metrics_callback=metrics.append)
         with _RangeServer() as server:
             rfs, object_data = _make_reference_file_system(data, server.url)
             server.data = object_data
             client = lindi.LindiH5pyFile.from_reference_file_system(
-                rfs, local_cache=cache, remote_read_options=options
+                rfs, local_cache=cache, range_read_options=options
             )
             dataset = client["data"]
             assert np.array_equal(dataset[0:4, :], data[0:4, :])
@@ -404,7 +404,7 @@ def test_partial_cache_hits_remove_only_cached_ranges_from_plan():
     metrics = []
     with tempfile.TemporaryDirectory() as tmpdir:
         cache = lindi.LocalCache(cache_dir=tmpdir)
-        options = lindi.LindiRemoteReadOptions(metrics_callback=metrics.append)
+        options = lindi.LindiRangeReadOptions(metrics_callback=metrics.append)
         with _RangeServer() as server:
             rfs, object_data = _make_reference_file_system(data, server.url)
             server.data = object_data
@@ -417,7 +417,7 @@ def test_partial_cache_hits_remove_only_cached_ranges_from_plan():
                     data=object_data[offset:offset + size],
                 )
             client = lindi.LindiH5pyFile.from_reference_file_system(
-                rfs, local_cache=cache, remote_read_options=options
+                rfs, local_cache=cache, range_read_options=options
             )
             dataset = client["data"]
             assert np.array_equal(dataset[0:4, :], data[0:4, :])
@@ -443,7 +443,7 @@ def test_selection_results_match_numpy(selection):
     data = np.arange(8 * 8, dtype=np.int32).reshape(8, 8)
     with _RangeServer() as server:
         client, dataset = _open_remote_dataset(
-            server, data, options=lindi.LindiRemoteReadOptions()
+            server, data, options=lindi.LindiRangeReadOptions()
         )
         assert np.array_equal(dataset[selection], data[selection])
         client.close()
@@ -455,7 +455,7 @@ def test_compressed_and_big_endian_chunks_preserve_exact_data():
         client, dataset = _open_remote_dataset(
             server,
             data,
-            options=lindi.LindiRemoteReadOptions(),
+            options=lindi.LindiRangeReadOptions(),
             compressor="zlib",
         )
         actual = dataset[1:7, 1:7]
@@ -471,7 +471,7 @@ def test_edge_chunk_padding_and_missing_chunk_fill_value():
         client, dataset = _open_remote_dataset(
             server,
             data,
-            options=lindi.LindiRemoteReadOptions(),
+            options=lindi.LindiRangeReadOptions(),
             chunks=(4, 2),
             truncate_edge_chunks=True,
         )
@@ -485,7 +485,7 @@ def test_edge_chunk_padding_and_missing_chunk_fill_value():
         client, dataset = _open_remote_dataset(
             server,
             data,
-            options=lindi.LindiRemoteReadOptions(),
+            options=lindi.LindiRangeReadOptions(),
             chunks=(4, 2),
             fill_value=fill_value,
             omitted_chunks={(0, 1)},
@@ -497,7 +497,7 @@ def test_edge_chunk_padding_and_missing_chunk_fill_value():
 def test_retry_metrics_and_short_response_failure():
     data = np.arange(8 * 8, dtype=np.int32).reshape(8, 8)
     metrics = []
-    options = lindi.LindiRemoteReadOptions(
+    options = lindi.LindiRangeReadOptions(
         max_retries=1,
         retry_backoff_seconds=0,
         metrics_callback=metrics.append,
@@ -506,14 +506,14 @@ def test_retry_metrics_and_short_response_failure():
         client, dataset = _open_remote_dataset(server, data, options=options)
         server.fail_requests = 1
         assert np.array_equal(dataset[0:4, 0:2], data[0:4, 0:2])
-        assert metrics[-1].range_get_count == 2
+        assert metrics[-1].read_attempt_count == 2
         client.close()
 
     with _RangeServer() as server:
         client, dataset = _open_remote_dataset(server, data, options=options)
         server.truncate_requests = 2
         server.omit_content_range = True
-        with pytest.raises(RemoteRangeReadError):
+        with pytest.raises(RangeReadError):
             dataset[0:4, 0:2]
         assert len(server.requests) == 2
         client.close()
@@ -523,7 +523,7 @@ def test_retry_metrics_and_short_response_failure():
 def test_retryable_http_statuses_recover(status):
     data = np.arange(8 * 8, dtype=np.int32).reshape(8, 8)
     metrics = []
-    options = lindi.LindiRemoteReadOptions(
+    options = lindi.LindiRangeReadOptions(
         max_retries=1,
         retry_backoff_seconds=0,
         metrics_callback=metrics.append,
@@ -533,21 +533,21 @@ def test_retryable_http_statuses_recover(status):
         server.response_statuses = [status, 206]
         assert np.array_equal(dataset[0:4, 0:2], data[0:4, 0:2])
         assert len(server.requests) == 2
-        assert metrics[-1].range_get_count == 2
+        assert metrics[-1].read_attempt_count == 2
         client.close()
 
 
 @pytest.mark.parametrize("status", [400, 401, 403, 404, 416])
 def test_permanent_http_statuses_are_not_retried(status):
     data = np.arange(8 * 8, dtype=np.int32).reshape(8, 8)
-    options = lindi.LindiRemoteReadOptions(
+    options = lindi.LindiRangeReadOptions(
         max_retries=3,
         retry_backoff_seconds=0,
     )
     with _RangeServer() as server:
         client, dataset = _open_remote_dataset(server, data, options=options)
         server.response_status = status
-        with pytest.raises(RemoteRangeReadError):
+        with pytest.raises(RangeReadError):
             dataset[0:4, 0:2]
         assert len(server.requests) == 1
         client.close()
@@ -562,7 +562,7 @@ def test_retry_after_parsing_and_budget(monkeypatch):
     assert _parse_retry_after_seconds("invalid", now=now) is None
 
     data = np.arange(8 * 8, dtype=np.int32).reshape(8, 8)
-    options = lindi.LindiRemoteReadOptions(
+    options = lindi.LindiRangeReadOptions(
         max_retries=3,
         retry_backoff_seconds=0,
         max_retry_elapsed_seconds=0.01,
@@ -571,13 +571,13 @@ def test_retry_after_parsing_and_budget(monkeypatch):
         client, dataset = _open_remote_dataset(server, data, options=options)
         server.response_statuses = [503, 206]
         server.retry_after = "120"
-        with pytest.raises(RemoteRangeReadError):
+        with pytest.raises(RangeReadError):
             dataset[0:4, 0:2]
         assert len(server.requests) == 1
         client.close()
 
     monkeypatch.setattr("tenacity.wait.random.uniform", lambda low, high: high)
-    options = lindi.LindiRemoteReadOptions(
+    options = lindi.LindiRangeReadOptions(
         max_retries=3,
         retry_backoff_seconds=1,
         retry_max_backoff_seconds=1,
@@ -586,7 +586,7 @@ def test_retry_after_parsing_and_budget(monkeypatch):
     with _RangeServer() as server:
         client, dataset = _open_remote_dataset(server, data, options=options)
         server.response_statuses = [500, 206]
-        with pytest.raises(RemoteRangeReadError):
+        with pytest.raises(RangeReadError):
             dataset[0:4, 0:2]
         assert len(server.requests) == 1
         client.close()
@@ -610,24 +610,24 @@ def test_tls_errors_are_not_retried(monkeypatch):
         requested_bytes=8,
         overread_bytes=0,
     )
-    with pytest.raises(RemoteRangeReadError):
+    with pytest.raises(RangeReadError):
         fetch_byte_range_requests(
             [request],
-            lindi.LindiRemoteReadOptions(max_retries=3, retry_backoff_seconds=0),
+            lindi.LindiRangeReadOptions(max_retries=3, retry_backoff_seconds=0),
         )
     assert request_count == 1
 
 
 def test_concurrent_worker_failure_and_ignored_range_are_rejected():
     data = np.arange(8 * 8, dtype=np.int32).reshape(8, 8)
-    options = lindi.LindiRemoteReadOptions(
+    options = lindi.LindiRangeReadOptions(
         max_concurrency=2,
         max_retries=0,
     )
     with _RangeServer() as server:
         client, dataset = _open_remote_dataset(server, data, options=options)
         server.fail_requests = 10
-        with pytest.raises(RemoteRangeReadError):
+        with pytest.raises(RangeReadError):
             dataset[0:4, [0, 1, 6, 7]]
         assert len(server.requests) >= 2
         client.close()
@@ -635,14 +635,14 @@ def test_concurrent_worker_failure_and_ignored_range_are_rejected():
     with _RangeServer() as server:
         client, dataset = _open_remote_dataset(server, data, options=options)
         server.response_status = 200
-        with pytest.raises(RemoteRangeReadError, match="ignored byte range"):
+        with pytest.raises(RangeReadError, match="ignored byte range"):
             dataset[0:4, 0:2]
         client.close()
 
     with _RangeServer() as server:
         client, dataset = _open_remote_dataset(server, data, options=options)
         server.content_range_offset_delta = 1
-        with pytest.raises(RemoteRangeReadError, match="Unexpected Content-Range"):
+        with pytest.raises(RangeReadError, match="Unexpected Content-Range"):
             dataset[0:4, 0:2]
         client.close()
 
@@ -662,7 +662,7 @@ def test_whole_object_200_response_is_accepted():
         server.response_status = 200
         fetched = fetch_byte_range_requests(
             [request],
-            lindi.LindiRemoteReadOptions(max_retries=0),
+            lindi.LindiRangeReadOptions(max_retries=0),
         )
         assert fetched[0].data == server.data
 
@@ -693,17 +693,17 @@ def test_force_explicit_chunk_references_for_selected_dataset():
 
 
 def test_metrics_are_json_serializable():
-    metrics = lindi.LindiRemoteReadMetrics(
+    metrics = lindi.LindiRangeReadMetrics(
         optimized=True,
         requested_key_count=1,
         returned_key_count=1,
         inline_value_count=0,
-        local_file_read_count=0,
-        remote_reference_count=1,
+        range_reference_count=1,
+        high_latency_reference_count=1,
         cache_hit_count=0,
         source_range_count=1,
         planned_request_count=1,
-        range_get_count=1,
+        read_attempt_count=1,
         requested_bytes=10,
         fetched_bytes=10,
         overread_bytes=0,
@@ -750,7 +750,7 @@ def test_nwb_layout_check_accepts_channel_major_per_channel_chunks():
     )
     client = lindi.LindiH5pyFile.from_reference_file_system(
         rfs,
-        remote_read_options=lindi.LindiRemoteReadOptions(layout_check="error"),
+        range_read_options=lindi.LindiRangeReadOptions(layout_check="error"),
     )
     client.close()
 
@@ -760,17 +760,17 @@ def test_nwb_layout_check_reports_channel_and_physical_amplification():
     channel_rfs, _ = _make_electrical_series_rfs(
         data, "https://example.invalid/object", chunks=(4, 2), channel_major=True
     )
-    with pytest.warns(lindi.LindiRemoteLayoutWarning, match="up to 2 channels"):
+    with pytest.warns(lindi.LindiRangeLayoutWarning, match="up to 2 channels"):
         client = lindi.LindiH5pyFile.from_reference_file_system(channel_rfs)
     client.close()
 
     time_rfs, _ = _make_electrical_series_rfs(
         data, "https://example.invalid/object", chunks=(4, 1), channel_major=False
     )
-    with pytest.raises(lindi.LindiRemoteLayoutError, match="not channel-major"):
+    with pytest.raises(lindi.LindiRangeLayoutError, match="not channel-major"):
         lindi.LindiH5pyFile.from_reference_file_system(
             time_rfs,
-            remote_read_options=lindi.LindiRemoteReadOptions(layout_check="error"),
+            range_read_options=lindi.LindiRangeReadOptions(layout_check="error"),
         )
 
 
@@ -786,7 +786,7 @@ def test_nwb_layout_check_reports_external_links_but_ignores_generic_arrays():
             "name": "/data",
         }
     }
-    with pytest.warns(lindi.LindiRemoteLayoutWarning, match="_EXTERNAL_ARRAY_LINK"):
+    with pytest.warns(lindi.LindiRangeLayoutWarning, match="_EXTERNAL_ARRAY_LINK"):
         client = lindi.LindiH5pyFile.from_reference_file_system(rfs)
     client.close()
 
@@ -795,7 +795,7 @@ def test_nwb_layout_check_reports_external_links_but_ignores_generic_arrays():
     )
     client = lindi.LindiH5pyFile.from_reference_file_system(
         generic_rfs,
-        remote_read_options=lindi.LindiRemoteReadOptions(layout_check="error"),
+        range_read_options=lindi.LindiRangeReadOptions(layout_check="error"),
     )
     client.close()
 
@@ -803,14 +803,14 @@ def test_nwb_layout_check_reports_external_links_but_ignores_generic_arrays():
 def test_runtime_chunk_amplification_warning_and_enriched_metrics():
     data = np.arange(8 * 8, dtype=np.int32).reshape(8, 8)
     metrics = []
-    thresholds = lindi.LindiRemoteEfficiencyThresholds(
+    thresholds = lindi.LindiRangeEfficiencyThresholds(
         chunk_amplification_ratio=4,
         chunk_excess_bytes=1,
         transport_overread_ratio=100,
         transport_overread_bytes=1,
         fragmented_request_count=100,
     )
-    options = lindi.LindiRemoteReadOptions(
+    options = lindi.LindiRangeReadOptions(
         metrics_callback=metrics.append,
         efficiency_warning_thresholds=thresholds,
     )
@@ -818,7 +818,7 @@ def test_runtime_chunk_amplification_warning_and_enriched_metrics():
         client, dataset = _open_remote_dataset(
             server, data, options=options, chunks=(4, 8)
         )
-        with pytest.warns(lindi.LindiRemoteEfficiencyWarning, match="chunk amplification"):
+        with pytest.warns(lindi.LindiRangeEfficiencyWarning, match="chunk amplification"):
             actual = dataset[0:4, 0]
         assert np.array_equal(actual, data[0:4, 0])
         assert metrics[-1].dataset_path == "/data"
@@ -830,7 +830,7 @@ def test_runtime_chunk_amplification_warning_and_enriched_metrics():
 
 def test_runtime_transport_and_fragmentation_warnings_are_deduplicated():
     data = np.arange(8 * 8, dtype=np.int32).reshape(8, 8)
-    fragmentation_thresholds = lindi.LindiRemoteEfficiencyThresholds(
+    fragmentation_thresholds = lindi.LindiRangeEfficiencyThresholds(
         chunk_amplification_ratio=100,
         chunk_excess_bytes=1,
         transport_overread_ratio=100,
@@ -838,7 +838,7 @@ def test_runtime_transport_and_fragmentation_warnings_are_deduplicated():
         fragmented_request_count=2,
     )
     with _RangeServer() as server:
-        options = lindi.LindiRemoteReadOptions(
+        options = lindi.LindiRangeReadOptions(
             efficiency_warning_thresholds=fragmentation_thresholds
         )
         client, dataset = _open_remote_dataset(
@@ -849,7 +849,7 @@ def test_runtime_transport_and_fragmentation_warnings_are_deduplicated():
             assert np.array_equal(dataset[:, 0], data[:, 0])
             assert np.array_equal(dataset[:, 0], data[:, 0])
         efficiency_warnings = [
-            x for x in caught if issubclass(x.category, lindi.LindiRemoteEfficiencyWarning)
+            x for x in caught if issubclass(x.category, lindi.LindiRangeEfficiencyWarning)
         ]
         assert len(efficiency_warnings) == 1
         assert "independent range requests" in str(efficiency_warnings[0].message)
@@ -859,14 +859,14 @@ def test_runtime_transport_and_fragmentation_warnings_are_deduplicated():
 def test_runtime_full_dataset_read_does_not_warn_about_chunk_amplification():
     data = np.arange(4 * 2, dtype=np.int32).reshape(4, 2)
     metrics = []
-    thresholds = lindi.LindiRemoteEfficiencyThresholds(
+    thresholds = lindi.LindiRangeEfficiencyThresholds(
         chunk_amplification_ratio=2,
         chunk_excess_bytes=1,
         transport_overread_ratio=100,
         transport_overread_bytes=1,
         fragmented_request_count=100,
     )
-    options = lindi.LindiRemoteReadOptions(
+    options = lindi.LindiRangeReadOptions(
         metrics_callback=metrics.append,
         efficiency_warning_thresholds=thresholds,
     )
@@ -878,7 +878,7 @@ def test_runtime_full_dataset_read_does_not_warn_about_chunk_amplification():
             warnings.simplefilter("always")
             assert np.array_equal(dataset[:], data)
         assert not any(
-            issubclass(x.category, lindi.LindiRemoteEfficiencyWarning)
+            issubclass(x.category, lindi.LindiRangeEfficiencyWarning)
             for x in caught
         )
         assert metrics[-1].dataset_logical_bytes == data.nbytes
@@ -888,9 +888,9 @@ def test_runtime_full_dataset_read_does_not_warn_about_chunk_amplification():
 @pytest.mark.parametrize("ratio", [float("nan"), float("inf"), 1])
 def test_efficiency_threshold_ratios_must_be_finite_and_greater_than_one(ratio):
     with pytest.raises(ValueError):
-        lindi.LindiRemoteEfficiencyThresholds(chunk_amplification_ratio=ratio)
+        lindi.LindiRangeEfficiencyThresholds(chunk_amplification_ratio=ratio)
     with pytest.raises(ValueError):
-        lindi.LindiRemoteEfficiencyThresholds(transport_overread_ratio=ratio)
+        lindi.LindiRangeEfficiencyThresholds(transport_overread_ratio=ratio)
 
 
 def test_layout_validation_is_bounded_by_reference_count():
@@ -902,7 +902,7 @@ def test_layout_validation_is_bounded_by_reference_count():
         10 ** 30,
         4,
     ]
-    with pytest.warns(lindi.LindiRemoteLayoutWarning, match="could not be safely verified"):
+    with pytest.warns(lindi.LindiRangeLayoutWarning, match="could not be safely verified"):
         client = lindi.LindiH5pyFile.from_reference_file_system(rfs)
     client.close()
 
@@ -922,16 +922,16 @@ def test_range_fetch_rejects_oversized_whole_object_before_reading_it():
             requested_bytes=8,
             overread_bytes=0,
         )
-        with pytest.raises(RemoteRangeReadError, match="Unexpected Content-Length"):
+        with pytest.raises(RangeReadError, match="Unexpected Content-Length"):
             fetch_byte_range_requests(
                 [request],
-                lindi.LindiRemoteReadOptions(max_retries=0),
+                lindi.LindiRangeReadOptions(max_retries=0),
             )
 
 
 def test_runtime_transport_overread_warning():
     data = np.arange(8 * 8, dtype=np.int32).reshape(8, 8)
-    transport_thresholds = lindi.LindiRemoteEfficiencyThresholds(
+    transport_thresholds = lindi.LindiRangeEfficiencyThresholds(
         chunk_amplification_ratio=100,
         chunk_excess_bytes=1,
         transport_overread_ratio=1.1,
@@ -939,7 +939,7 @@ def test_runtime_transport_overread_warning():
         fragmented_request_count=100,
     )
     with _RangeServer() as server:
-        options = lindi.LindiRemoteReadOptions(
+        options = lindi.LindiRangeReadOptions(
             max_gap_bytes=7,
             max_overread_bytes=21,
             max_request_bytes=None,
@@ -948,7 +948,7 @@ def test_runtime_transport_overread_warning():
         client, dataset = _open_remote_dataset(
             server, data, options=options, chunks=(4, 2), gap_bytes=7
         )
-        with pytest.warns(lindi.LindiRemoteEfficiencyWarning, match="transport over-read"):
+        with pytest.warns(lindi.LindiRangeEfficiencyWarning, match="transport over-read"):
             assert np.array_equal(dataset[0:4, :], data[0:4, :])
         client.close()
 
@@ -990,7 +990,7 @@ def test_benchmark_cli_reports_optimized_and_baseline_requests():
             text=True,
         )
         optimized_result = json.loads(optimized.stdout)
-        assert optimized_result["summary"]["total_range_gets"] == 1
+        assert optimized_result["summary"]["total_read_attempts"] == 1
         assert optimized_result["summary"]["total_overread_bytes"] == 0
 
         baseline = subprocess.run(
@@ -1002,5 +1002,5 @@ def test_benchmark_cli_reports_optimized_and_baseline_requests():
             text=True,
         )
         baseline_result = json.loads(baseline.stdout)
-        assert baseline_result["summary"]["total_range_gets"] == 4
+        assert baseline_result["summary"]["total_read_attempts"] == 4
         assert baseline_result["options"]["enabled"] is False

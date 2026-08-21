@@ -1,9 +1,6 @@
-*
-!README.md
-!pyproject.toml
-!lindi/
-!lindi/**
-!benchmarks/
-!benchmarks/Dockerfile.nrp
-!benchmarks/benchmark_random_remote_ranges.py
-
+.git
+.venv
+__pycache__
+.pytest_cache
+.coverage
+coverage.xml

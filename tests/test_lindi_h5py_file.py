@@ -1,5 +1,7 @@
 import tempfile
 import os
+from pathlib import Path
+
 import pytest
 import h5py
 import lindi
@@ -140,18 +142,20 @@ def test_fail_write_lindi_json_from_local_lindi_tar():
                 f.write_lindi_file(f'{tmpdir}/test.lindi.json')
 
 
-@pytest.mark.network
-def test_create_local_lindi_json_from_remote_lindi_tar():
-    # This example will probably disappear in the future
-    # and will need to be replaced with another example
-    # https://neurosift.app/?p=/nwb&url=https://tempory.net/f/dendro/f/hello_world_service/hello_neurosift/spike_sorting_post_processing/FKu2zK3TAsehGtJJXjQa/output/post.nwb.lindi.tar&dandisetId=215561&dandisetVersion=draft&st=lindi
-    url = 'https://tempory.net/f/dendro/f/hello_world_service/hello_neurosift/spike_sorting_post_processing/FKu2zK3TAsehGtJJXjQa/output/post.nwb.lindi.tar'
+def test_create_local_lindi_json_from_remote_lindi_tar(serve_file_over_http):
     with tempfile.TemporaryDirectory() as tmpdir:
+        source_tar = Path(tmpdir) / 'source.lindi.tar'
+        with lindi.LindiH5pyFile.from_lindi_file(str(source_tar), mode='w') as f:
+            f.attrs['attr1'] = 'value1'
+            f.create_dataset('data', data=list(range(2000)))
+        url = serve_file_over_http(source_tar)
         with lindi.LindiH5pyFile.from_lindi_file(url) as f:
             f.write_lindi_file(f'{tmpdir}/test.lindi.json')
-        f1 = lindi.LindiH5pyFile.from_lindi_file(url)
-        f2 = lindi.LindiH5pyFile.from_lindi_file(f'{tmpdir}/test.lindi.json')
-        assert_h5py_files_equal(f1, f2, skip_large_datasets=True)
+        with lindi.LindiH5pyFile.from_lindi_file(url) as f1:
+            with lindi.LindiH5pyFile.from_lindi_file(
+                f'{tmpdir}/test.lindi.json'
+            ) as f2:
+                assert_h5py_files_equal(f1, f2, skip_large_datasets=True)
 
 
 def test_write_lindi_json_with_generation_metadata():

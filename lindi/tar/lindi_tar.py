@@ -4,7 +4,7 @@ import secrets
 import string
 import urllib.request
 from .create_tar_header import create_tar_header
-from ..remote_reading import DEFAULT_REMOTE_REQUEST_TIMEOUT_SECONDS
+from ..range_reading import DEFAULT_RANGE_REQUEST_TIMEOUT_SECONDS
 
 
 TAR_ENTRY_JSON_SIZE = 1024
@@ -414,7 +414,7 @@ def _download_file_byte_range(url: str, start: int, end: int) -> bytes:
     req = urllib.request.Request(url, headers=headers)
     # The scheme is restricted above.
     with urllib.request.urlopen(  # nosec B310
-        req, timeout=DEFAULT_REMOTE_REQUEST_TIMEOUT_SECONDS
+        req, timeout=DEFAULT_RANGE_REQUEST_TIMEOUT_SECONDS
     ) as response:
         return response.read()
 
@@ -423,7 +423,7 @@ def _load_all_bytes_from_local_or_remote_file(path_or_url: str) -> bytes:
     if path_or_url.startswith("http://") or path_or_url.startswith("https://"):
         # This branch restricts the scheme.
         with urllib.request.urlopen(  # nosec B310
-            path_or_url, timeout=DEFAULT_REMOTE_REQUEST_TIMEOUT_SECONDS
+            path_or_url, timeout=DEFAULT_RANGE_REQUEST_TIMEOUT_SECONDS
         ) as response:
             return response.read()
     else:

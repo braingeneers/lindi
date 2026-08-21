@@ -1,4 +1,6 @@
 import tempfile
+from pathlib import Path
+
 import pytest
 import lindi
 
@@ -54,25 +56,23 @@ def test_write_growing_lindi_tar():
                     assert f.get_file_byte_range('lindi.json')
 
 
-@pytest.mark.network
-def test_load_remote_lindi_tar():
-    # This example will probably disappear in the future
-    # and will need to be replaced with another example
-    # https://neurosift.app/?p=/nwb&url=https://tempory.net/f/dendro/f/hello_world_service/hello_neurosift/spike_sorting_post_processing/FKu2zK3TAsehGtJJXjQa/output/post.nwb.lindi.tar&dandisetId=215561&dandisetVersion=draft&st=lindi
-    url = 'https://tempory.net/f/dendro/f/hello_world_service/hello_neurosift/spike_sorting_post_processing/FKu2zK3TAsehGtJJXjQa/output/post.nwb.lindi.tar'
-
+def test_load_remote_lindi_tar(serve_file_over_http):
     from lindi.tar.lindi_tar import LindiTarFile
-    with LindiTarFile(url) as f:
-        a = f.get_file_info('lindi.json')
-        assert isinstance(a, dict)
-        with pytest.raises(ValueError):
-            # cannot overwrite for remote file
-            f.overwrite_file_content('lindi.json', b'xxx')
-        with pytest.raises(ValueError):
-            # cannot trash file for remote file
-            f.trash_file('lindi.json')
+    with tempfile.TemporaryDirectory() as tmpdir:
+        source_tar = f'{tmpdir}/source.lindi.tar'
+        with lindi.LindiH5pyFile.from_lindi_file(source_tar, mode='w') as source:
+            source.attrs['attr1'] = 'value1'
+        url = serve_file_over_http(Path(source_tar))
+        with LindiTarFile(url) as f:
+            a = f.get_file_info('lindi.json')
+            assert isinstance(a, dict)
+            with pytest.raises(ValueError):
+                # cannot overwrite for remote file
+                f.overwrite_file_content('lindi.json', b'xxx')
+            with pytest.raises(ValueError):
+                # cannot trash file for remote file
+                f.trash_file('lindi.json')
 
 
 if __name__ == '__main__':
     test_write_growing_lindi_tar()
-    test_load_remote_lindi_tar()

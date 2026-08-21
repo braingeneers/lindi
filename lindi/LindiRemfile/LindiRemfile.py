@@ -4,7 +4,7 @@ import os
 import requests
 from .additional_url_resolvers import get_additional_url_resolvers
 from ..LocalCache.LocalCache import LocalCache
-from ..remote_reading import DEFAULT_REMOTE_REQUEST_TIMEOUT_SECONDS
+from ..range_reading import DEFAULT_RANGE_REQUEST_TIMEOUT_SECONDS
 
 default_min_chunk_size = 128 * 1024  # This is different from Remfile - this is an important decision because it determines the chunk size in the LocalCache
 default_max_cache_size = 1024 * 1024 * 1024
@@ -76,7 +76,7 @@ class LindiRemfile:
         response = requests.get(
             _resolve_url(self._url),
             stream=True,
-            timeout=DEFAULT_REMOTE_REQUEST_TIMEOUT_SECONDS,
+            timeout=DEFAULT_RANGE_REQUEST_TIMEOUT_SECONDS,
         )
         if response.status_code == 200:
             self.length = int(response.headers["Content-Length"])
@@ -332,7 +332,7 @@ def _get_bytes(
                 response = session.get(
                     actual_url,
                     headers={"Range": range_header},
-                    timeout=DEFAULT_REMOTE_REQUEST_TIMEOUT_SECONDS,
+                    timeout=DEFAULT_RANGE_REQUEST_TIMEOUT_SECONDS,
                 )
                 response.raise_for_status()
                 data = response.content
@@ -385,7 +385,7 @@ def _resolve_dandi_url(url: str):
         url,
         allow_redirects=True,
         headers=headers,
-        timeout=DEFAULT_REMOTE_REQUEST_TIMEOUT_SECONDS,
+        timeout=DEFAULT_RANGE_REQUEST_TIMEOUT_SECONDS,
     )
     return str(resp.url)
 

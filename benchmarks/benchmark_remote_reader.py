@@ -70,7 +70,7 @@ def main():
         parser.error("--stop must be greater than --start")
 
     metrics = []
-    options = lindi.LindiRemoteReadOptions(
+    options = lindi.LindiRangeReadOptions(
         enabled=not args.baseline,
         max_gap_bytes=args.max_gap_bytes,
         max_overread_bytes=args.max_overread_bytes,
@@ -84,7 +84,7 @@ def main():
     client = lindi.LindiH5pyFile.from_lindi_file(
         args.lindi_url,
         local_cache=cache,
-        remote_read_options=options,
+        range_read_options=options,
     )
     try:
         dataset = client[args.dataset]
@@ -147,8 +147,8 @@ def main():
                 "median_elapsed_seconds": statistics.median(elapsed_values),
                 "min_elapsed_seconds": min(elapsed_values),
                 "max_elapsed_seconds": max(elapsed_values),
-                "total_range_gets": sum(
-                    read["range_get_count"]
+                "total_read_attempts": sum(
+                    read["read_attempt_count"]
                     for iteration in measured
                     for read in iteration["reads"]
                 ),

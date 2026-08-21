@@ -234,17 +234,19 @@ data = f['processing/ecephys/LFP/LFP/data'][:1000]
 - Enables faster iteration when developing and testing code with remote data
 - Particularly effective for accessing NWB files from DANDI Archive multiple times
 
-## High-performance remote reads
+## High-performance range reads
 
-LINDI batches all chunk references needed by one Zarr selection, coalesces
-adjacent byte ranges, and fetches independent ranges concurrently. Zarr remains
-responsible for selection semantics, decompression, filters, and array assembly.
+LINDI batches all referenced chunks needed by one Zarr selection, coalesces
+adjacent byte ranges, and fetches independent ranges concurrently through a
+transport-neutral executor. HTTP(S), local paths, and `file://` sources are
+supported by default. Zarr remains responsible for selection semantics,
+decompression, filters, and array assembly.
 
 ```python
 import lindi
 
 read_metrics = []
-options = lindi.LindiRemoteReadOptions(
+options = lindi.LindiRangeReadOptions(
     max_gap_bytes=1024 * 1024,
     max_overread_bytes=8 * 1024 * 1024,
     max_concurrency=8,
@@ -253,7 +255,7 @@ options = lindi.LindiRemoteReadOptions(
 
 with lindi.LindiH5pyFile.from_lindi_file(
     "recording.nwb.lindi.json",
-    remote_read_options=options,
+    range_read_options=options,
 ) as file:
     data = file["acquisition/ElectricalSeries/data"]
     window = data[1_000_000:1_100_000, [0, 1, 128, 129]]
@@ -268,10 +270,10 @@ transport over-read, or request fragmentation. Both policies and their
 thresholds are configurable:
 
 ```python
-options = lindi.LindiRemoteReadOptions(
+options = lindi.LindiRangeReadOptions(
     layout_check="error",  # use "warn" (default), "error", or "ignore"
     runtime_efficiency_check="warn",
-    efficiency_warning_thresholds=lindi.LindiRemoteEfficiencyThresholds(
+    efficiency_warning_thresholds=lindi.LindiRangeEfficiencyThresholds(
         chunk_amplification_ratio=8,
         chunk_excess_bytes=1024 * 1024,
         transport_overread_ratio=2,
@@ -285,13 +287,13 @@ Runtime metrics keep logical/chunk amplification separate from compressed-byte
 transport over-read. This makes the runtime check useful for non-NWB LINDI
 arrays as well as NWB signals.
 
-Remote range requests retry transient connection failures, response-integrity
+HTTP range requests retry transient connection failures, response-integrity
 failures, and HTTP 408, 429, 500, 502, 503, and 504 responses. Retries use
 randomized exponential backoff, honor `Retry-After`, and stop after both the
 configured attempt count and a per-range elapsed-time budget:
 
 ```python
-options = lindi.LindiRemoteReadOptions(
+options = lindi.LindiRangeReadOptions(
     max_retries=8,                    # retries after the initial attempt
     retry_backoff_seconds=0.1,        # exponential-jitter multiplier
     retry_max_backoff_seconds=10,
@@ -301,10 +303,25 @@ options = lindi.LindiRemoteReadOptions(
 )
 ```
 
-`range_get_count` includes every physical attempt, while elapsed metrics include
+`read_attempt_count` includes every physical attempt, while elapsed metrics include
 retry waits. Permanent HTTP errors and TLS certificate validation failures are
 not retried. The elapsed-time budget prevents scheduling new attempts after the
 deadline; an attempt already in progress remains bounded by its request timeout.
+
+Custom schemes can be supplied per file without global registration by mapping
+their lowercase URI scheme to a `RangeTransport` factory:
+
+```python
+with lindi.LindiH5pyFile.from_lindi_file(
+    "recording.nwb.lindi.json",
+    range_transports={"s3": make_s3_transport},
+) as file:
+    data = file["acquisition/ElectricalSeries/data"][:]
+```
+
+Transports operate only on byte ranges and are independent of Zarr and NWB.
+This boundary is intended for later reuse by `LindiRemfile`; direct HDF5, tar,
+and manifest loading retain their existing paths for now.
 
 The fast path requires explicit chunk references. When generating a LINDI JSON,
 force those references only for the target arrays so other very large datasets

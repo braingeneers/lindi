@@ -22,10 +22,10 @@ from urllib.parse import urlsplit, urlunsplit
 
 import requests
 
-from lindi.remote_reading import (
+from lindi.range_reading import (
     ByteRange,
     FetchedByteRangeRequest,
-    LindiRemoteReadOptions,
+    LindiRangeReadOptions,
     fetch_byte_range_requests,
     plan_byte_range_requests,
 )
@@ -280,7 +280,7 @@ def _run_strategy(
     optimized: bool,
     args: argparse.Namespace,
 ) -> dict[str, Any]:
-    options = LindiRemoteReadOptions(
+    options = LindiRangeReadOptions(
         enabled=optimized,
         max_gap_bytes=args.max_gap_bytes,
         max_overread_bytes=args.max_overread_bytes,
@@ -303,7 +303,7 @@ def _run_strategy(
         "strategy": "optimized" if optimized else "baseline",
         "source_range_count": len(ranges),
         "planned_request_count": len(planned),
-        "range_get_count": request_count,
+        "read_attempt_count": request_count,
         "retry_count": request_count - len(planned),
         "requested_bytes": requested_bytes,
         "fetched_bytes": fetched_bytes,

@@ -1,0 +1,22 @@
+ARG PYTHON_VERSION=3.12
+FROM python:${PYTHON_VERSION}-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    HOME=/tmp/lindi-test-home \
+    XDG_CACHE_HOME=/tmp/lindi-test-cache
+
+WORKDIR /workspace
+
+RUN mkdir -p "$HOME" "$XDG_CACHE_HOME" && chmod 1777 "$HOME" "$XDG_CACHE_HOME"
+
+COPY pyproject.toml poetry.lock README.md requirements-test.txt ./
+COPY lindi ./lindi
+RUN pip install --no-cache-dir . -r requirements-test.txt
+
+COPY pytest.ini ./
+COPY tests ./tests
+COPY benchmarks/benchmark_remote_reader.py ./benchmarks/benchmark_remote_reader.py
+
+CMD ["pytest", "-m", "not network and not live_object_store", "tests/"]

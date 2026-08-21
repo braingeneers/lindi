@@ -1,4 +1,4 @@
-from typing import Union, Literal
+from typing import Literal, Mapping, Union
 import os
 import json
 import tempfile
@@ -16,10 +16,11 @@ from .LindiReferenceFileSystemStore import LindiReferenceFileSystemStore
 from ..LindiH5ZarrStore.LindiH5ZarrStoreOpts import LindiH5ZarrStoreOpts
 
 from ..LocalCache.LocalCache import LocalCache
-from ..remote_diagnostics import validate_nwb_electrical_series_layout
-from ..remote_reading import (
-    DEFAULT_REMOTE_REQUEST_TIMEOUT_SECONDS,
-    LindiRemoteReadOptions,
+from ..range_diagnostics import validate_nwb_electrical_series_layout
+from ..range_reading import (
+    DEFAULT_RANGE_REQUEST_TIMEOUT_SECONDS,
+    LindiRangeReadOptions,
+    RangeTransportFactory,
 )
 
 from ..LindiH5ZarrStore._util import _write_rfs_to_file
@@ -51,9 +52,10 @@ class LindiH5pyFile(h5py.File):
             if isinstance(_zarr_store, LindiTarStore)
             else _zarr_store
         )
-        self._remote_read_options = getattr(base_store, "remote_read_options", None)
-        self._remote_efficiency_warned_categories = set()
-        self._remote_efficiency_warning_lock = threading.Lock()
+        self._range_read_options = getattr(base_store, "range_read_options", None)
+        self._range_efficiency_warned_categories = set()
+        self._range_efficiency_warning_lock = threading.Lock()
+        self._external_hdf5_clients = {}
 
         # see comment in LindiH5pyGroup
         self._id = f'{id(self._zarr_group)}/'
@@ -66,7 +68,10 @@ class LindiH5pyFile(h5py.File):
         *,
         mode: LindiFileMode = "r",
         local_cache: Union[LocalCache, None] = None,
-        remote_read_options: Union[LindiRemoteReadOptions, None] = None,
+        range_read_options: Union[LindiRangeReadOptions, None] = None,
+        range_transports: Union[
+            Mapping[str, RangeTransportFactory], None
+        ] = None,
     ):
         """
         Create a LindiH5pyFile from a URL or path to a .lindi.json file.
@@ -77,7 +82,8 @@ class LindiH5pyFile(h5py.File):
             url_or_path,
             mode=mode,
             local_cache=local_cache,
-            remote_read_options=remote_read_options,
+            range_read_options=range_read_options,
+            range_transports=range_transports,
         )
 
     @staticmethod
@@ -127,7 +133,10 @@ class LindiH5pyFile(h5py.File):
         *,
         mode: LindiFileMode = "r",
         local_cache: Union[LocalCache, None] = None,
-        remote_read_options: Union[LindiRemoteReadOptions, None] = None,
+        range_read_options: Union[LindiRangeReadOptions, None] = None,
+        range_transports: Union[
+            Mapping[str, RangeTransportFactory], None
+        ] = None,
         _source_url_or_path: Union[str, None] = None,
         _source_tar_file: Union[LindiTarFile, None] = None,
         _close_source_tar_file_on_close: bool = False,
@@ -145,9 +154,11 @@ class LindiH5pyFile(h5py.File):
             The mode to open the file object in, by default "r".
         local_cache : Union[LocalCache, None], optional
             The local cache to use for caching data, by default None.
-        remote_read_options : Union[LindiRemoteReadOptions, None], optional
+        range_read_options : Union[LindiRangeReadOptions, None], optional
             Coalescing, concurrency, retry, and instrumentation options for
-            remote chunk references. Defaults to LindiRemoteReadOptions().
+            referenced byte ranges. Defaults to LindiRangeReadOptions().
+        range_transports : Mapping[str, RangeTransportFactory], optional
+            Per-file transport factories keyed by lowercase URI scheme.
         _source_url_or_path : Union[str, None], optional
             Internal use only
         _source_tar_file : Union[LindiTarFile, None], optional
@@ -167,7 +178,8 @@ class LindiH5pyFile(h5py.File):
                     data,
                     mode=mode,
                     local_cache=local_cache,
-                    remote_read_options=remote_read_options,
+                    range_read_options=range_read_options,
+                    range_transports=range_transports,
                     _source_tar_file=tar_file,
                     _source_url_or_path=rfs,
                     _close_source_tar_file_on_close=_close_source_tar_file_on_close
@@ -210,7 +222,8 @@ class LindiH5pyFile(h5py.File):
                     data,
                     mode=mode,
                     local_cache=local_cache,
-                    remote_read_options=remote_read_options,
+                    range_read_options=range_read_options,
+                    range_transports=range_transports,
                     _source_url_or_path=rfs,
                     _source_tar_file=tar_file,
                     _close_source_tar_file_on_close=True
@@ -220,7 +233,8 @@ class LindiH5pyFile(h5py.File):
             store = LindiReferenceFileSystemStore(
                 rfs,
                 local_cache=local_cache,
-                remote_read_options=remote_read_options,
+                range_read_options=range_read_options,
+                range_transports=range_transports,
                 _source_url_or_path=_source_url_or_path,
                 _source_tar_file=_source_tar_file
             )
@@ -364,11 +378,23 @@ class LindiH5pyFile(h5py.File):
 
     def close(self):
         if not self._is_open:
-            print('Warning: LINDI file already closed.')  # pragma: no cover
             return  # pragma: no cover
         self.flush()
+        for hdf5_client, file_object in self._external_hdf5_clients.values():
+            try:
+                hdf5_client.close()
+            finally:
+                file_object.close()
+        self._external_hdf5_clients = {}
         if self._close_source_tar_file_on_close and self._source_tar_file:
             self._source_tar_file.close()
+        base_store = (
+            self._zarr_store._base_store
+            if isinstance(self._zarr_store, LindiTarStore)
+            else self._zarr_store
+        )
+        if isinstance(base_store, LindiReferenceFileSystemStore):
+            base_store.close()
         self._is_open = False
 
     def flush(self):
@@ -535,7 +561,7 @@ def _download_file(url: str, filename: str) -> None:
     req = urllib.request.Request(url, headers=headers)
     # The scheme is restricted above.
     with urllib.request.urlopen(  # nosec B310
-        req, timeout=DEFAULT_REMOTE_REQUEST_TIMEOUT_SECONDS
+        req, timeout=DEFAULT_RANGE_REQUEST_TIMEOUT_SECONDS
     ) as response:
         with open(filename, "wb") as f:
             f.write(response.read())
@@ -682,7 +708,7 @@ def _get_file_size_of_remote_file(url: str) -> int:
     req = urllib.request.Request(url, headers=headers)
     # The scheme is restricted above.
     with urllib.request.urlopen(  # nosec B310
-        req, timeout=DEFAULT_REMOTE_REQUEST_TIMEOUT_SECONDS
+        req, timeout=DEFAULT_RANGE_REQUEST_TIMEOUT_SECONDS
     ) as response:
         return int(response.headers['Content-Length'])
 
@@ -697,7 +723,7 @@ def _download_file_byte_range(url: str, start: int, end: int) -> bytes:
     req = urllib.request.Request(url, headers=headers)
     # The scheme is restricted above.
     with urllib.request.urlopen(  # nosec B310
-        req, timeout=DEFAULT_REMOTE_REQUEST_TIMEOUT_SECONDS
+        req, timeout=DEFAULT_RANGE_REQUEST_TIMEOUT_SECONDS
     ) as response:
         return response.read()
 

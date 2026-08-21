@@ -9,13 +9,22 @@ from .LindiH5pyFile import (
 from .LindiH5ZarrStore import LindiH5ZarrStore, LindiH5ZarrStoreOpts
 from .LindiRemfile.additional_url_resolvers import add_additional_url_resolver
 from .LocalCache.LocalCache import ChunkTooLargeError, LocalCache
-from .remote_reading import (
-    LindiRemoteEfficiencyThresholds,
-    LindiRemoteEfficiencyWarning,
-    LindiRemoteLayoutError,
-    LindiRemoteLayoutWarning,
-    LindiRemoteReadMetrics,
-    LindiRemoteReadOptions,
+from .range_reading import (
+    HttpRangeTransport,
+    LocalFileRangeTransport,
+    LindiRangeEfficiencyThresholds,
+    LindiRangeEfficiencyWarning,
+    LindiRangeLayoutError,
+    LindiRangeLayoutWarning,
+    LindiRangeReadMetrics,
+    LindiRangeReadOptions,
+    PermanentRangeTransportError,
+    RangeReadError,
+    RangeTransport,
+    RangeTransportCapabilities,
+    RangeTransportFactory,
+    RangeTransportResult,
+    RetryableRangeTransportError,
 )
 
 __all__ = [
@@ -30,10 +39,19 @@ __all__ = [
     "LocalCache",
     "ChunkTooLargeError",
     "add_additional_url_resolver",
-    "LindiRemoteReadMetrics",
-    "LindiRemoteReadOptions",
-    "LindiRemoteEfficiencyThresholds",
-    "LindiRemoteEfficiencyWarning",
-    "LindiRemoteLayoutError",
-    "LindiRemoteLayoutWarning",
+    "LindiRangeReadMetrics",
+    "LindiRangeReadOptions",
+    "LindiRangeEfficiencyThresholds",
+    "LindiRangeEfficiencyWarning",
+    "LindiRangeLayoutError",
+    "LindiRangeLayoutWarning",
+    "RangeTransport",
+    "RangeTransportCapabilities",
+    "RangeTransportFactory",
+    "RangeTransportResult",
+    "RetryableRangeTransportError",
+    "PermanentRangeTransportError",
+    "RangeReadError",
+    "HttpRangeTransport",
+    "LocalFileRangeTransport",
 ]
