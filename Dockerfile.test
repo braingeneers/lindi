@@ -1,5 +1,5 @@
 ARG PYTHON_VERSION=3.12
-FROM python:${PYTHON_VERSION}-slim
+FROM python:${PYTHON_VERSION}-slim AS tests
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -20,3 +20,19 @@ COPY tests ./tests
 COPY benchmarks/benchmark_remote_reader.py ./benchmarks/benchmark_remote_reader.py
 
 CMD ["pytest", "-m", "not network and not live_object_store", "tests/"]
+
+FROM tests AS maxwell-tests
+RUN python - <<'PY'
+import hashlib
+from pathlib import Path
+from urllib.request import urlopen
+url = 'https://share.mxwbio.com/d/7f2d1e98a1724a1b8b35/files/?p=%2FLinux%2Flibcompression.so&dl=1'
+with urlopen(url, timeout=60) as response:
+    payload = response.read()
+assert hashlib.sha256(payload).hexdigest() == '4bc74ea98c08b70406aa976950fcf5f55d572430f51d3882eeb947c557dd14f4'
+Path('/opt/hdf5_plugin').mkdir()
+Path('/opt/hdf5_plugin/libcompression.so').write_bytes(payload)
+PY
+ENV HDF5_PLUGIN_PATH=/opt/hdf5_plugin
+
+FROM tests AS default

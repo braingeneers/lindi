@@ -343,6 +343,45 @@ with lindi.LindiH5pyFile.from_hdf5_file(
 See [the campaign harness](benchmarks/README.md) for reproducible Ceph/S3
 measurement and an instrumented sequential baseline.
 
+### Credentialed S3 and Maxwell chunks
+
+Install `lindi[s3]` for the optional signed S3 transport. It uses boto3's normal
+credential chain (profiles, environment or workload credentials) and leaves
+physical retries to the range executor:
+
+```python
+from functools import partial
+from lindi.s3_transport import S3RangeTransport
+
+file = lindi.LindiH5pyFile.from_reference_file_system(
+    reference_dictionary,
+    range_transports={"s3": partial(
+        S3RangeTransport, endpoint_url="https://my-s3-endpoint",
+    )},
+)
+```
+
+Load an S3 sidecar separately with a credentialed object client and pass the
+parsed dictionary. References must use `s3://bucket/key`; endpoint-specific
+HTTPS-to-S3 mapping belongs to the application. No credentials are embedded in
+the reference dictionary. The transport checks exact ranges and ETags, sends
+`If-Match` after the first read, and closes reusable clients with the file.
+
+For workflow sidecars declaring `maxwell-mxw-data` version 1 / HDF5 filter 401,
+call `from lindi.maxwell_codec import register_maxwell_codec`, then
+`register_maxwell_codec()` before opening the file. Install the native Maxwell
+`libcompression.so` separately and set `HDF5_PLUGIN_PATH` to its directory.
+Registration is explicit; there is no runtime download or implicit vendor
+dependency. Encoded bytes are preserved before decompression, including final
+chunks. The native decoder currently requires a compatible Unix shared library.
+
+The native parity tests run in the checksum-pinned test image:
+
+```bash
+docker build -f Dockerfile.test --target maxwell-tests -t lindi-native-tests .
+docker run --rm lindi-native-tests pytest tests/test_maxwell_codec.py tests/test_encoded_padding.py tests/test_s3_transport.py
+```
+
 ## Notes
 
 This project was inspired by [kerchunk](https://github.com/fsspec/kerchunk) and [hdmf-zarr](https://hdmf-zarr.readthedocs.io/en/latest/index.html).

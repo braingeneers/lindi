@@ -567,6 +567,10 @@ def _get_padded_size(store, key: str, val: bytes):
             zarray_json = store.__getitem__(zarray_key)
             assert isinstance(zarray_json, bytes)
             zarray = json.loads(zarray_json)
+            # Encoded chunks have a variable byte length. Padding before the
+            # compressor/filter pipeline changes its input (notably filter 401).
+            if zarray.get('compressor') or zarray.get('filters'):
+                return None
             chunk_shape = zarray['chunks']
             dtype = zarray['dtype']
             if np.dtype(dtype).kind in ['i', 'u', 'f']:
