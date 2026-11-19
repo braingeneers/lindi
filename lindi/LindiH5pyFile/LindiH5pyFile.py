@@ -16,7 +16,7 @@ from .LindiReferenceFileSystemStore import LindiReferenceFileSystemStore
 from ..LindiH5ZarrStore.LindiH5ZarrStoreOpts import LindiH5ZarrStoreOpts
 
 from ..LocalCache.LocalCache import LocalCache
-from ..range_diagnostics import validate_nwb_electrical_series_layout
+from ..range_diagnostics import check_nwb_electrical_series_layout
 from ..range_reading import (
     DEFAULT_RANGE_REQUEST_TIMEOUT_SECONDS,
     LindiRangeReadOptions,
@@ -238,7 +238,7 @@ class LindiH5pyFile(h5py.File):
                 _source_url_or_path=_source_url_or_path,
                 _source_tar_file=_source_tar_file
             )
-            validate_nwb_electrical_series_layout(store)
+            check_nwb_electrical_series_layout(store)
             source_is_url = _source_url_or_path is not None and (_source_url_or_path.startswith("http://") or _source_url_or_path.startswith("https://"))
             if _source_url_or_path and _source_tar_file and not source_is_url:
                 store = LindiTarStore(base_store=store, tar_file=_source_tar_file)

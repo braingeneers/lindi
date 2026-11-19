@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 from email.utils import format_datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from unittest.mock import Mock
 
 import h5py
 import numpy as np
@@ -20,8 +21,10 @@ import pytest
 import requests
 
 import lindi
+from lindi import range_diagnostics
 from lindi.range_reading import (
     ByteRange,
+    LocalFileRangeTransport,
     PlannedByteRangeRequest,
     RangeReadError,
     _parse_retry_after_seconds,
@@ -753,6 +756,90 @@ def test_nwb_layout_check_accepts_channel_major_per_channel_chunks():
         range_read_options=lindi.LindiRangeReadOptions(layout_check="error"),
     )
     client.close()
+
+
+@pytest.fixture
+def layout_validator(monkeypatch):
+    monkeypatch.setattr(range_diagnostics, "_layout_cache", type(range_diagnostics._layout_cache)())
+    validator = Mock(wraps=range_diagnostics.validate_nwb_electrical_series_layout)
+    monkeypatch.setattr(range_diagnostics, "validate_nwb_electrical_series_layout", validator)
+    return validator
+
+
+@pytest.mark.parametrize("open_path", [False, True], ids=["dict", "path"])
+def test_nwb_layout_check_reuses_unchanged_reference(tmp_path, layout_validator, open_path):
+    data = np.arange(8 * 4, dtype=np.int16).reshape(8, 4)
+    rfs, _ = _make_electrical_series_rfs(
+        data, "https://example.invalid/object", chunks=(4, 1), channel_major=True
+    )
+    path = tmp_path / "recording.lindi.json"
+    options = lindi.LindiRangeReadOptions(layout_check="error")
+
+    def open_reference():
+        if open_path:
+            path.write_text(json.dumps(rfs))
+            return lindi.LindiH5pyFile.from_lindi_file(str(path), range_read_options=options)
+        return lindi.LindiH5pyFile.from_reference_file_system(rfs, range_read_options=options)
+
+    with open_reference():
+        pass
+    with open_reference():
+        pass
+    layout_validator.assert_called_once()
+
+    rfs["refs"]["acquisition/TestElectricalSeries/data/1.0"][1] += 1
+    with pytest.raises(lindi.LindiRangeLayoutError, match="not channel-major"):
+        open_reference()
+    assert layout_validator.call_count == 2
+
+
+def test_nwb_layout_check_replays_cached_diagnostic(layout_validator):
+    data = np.arange(8 * 4, dtype=np.int16).reshape(8, 4)
+    rfs, _ = _make_electrical_series_rfs(
+        data, "https://example.invalid/object", chunks=(4, 2), channel_major=True
+    )
+    for _ in range(2):
+        with pytest.warns(lindi.LindiRangeLayoutWarning, match="up to 2 channels"):
+            with lindi.LindiH5pyFile.from_reference_file_system(rfs):
+                pass
+    with pytest.raises(lindi.LindiRangeLayoutError, match="up to 2 channels"):
+        lindi.LindiH5pyFile.from_reference_file_system(
+            rfs, range_read_options=lindi.LindiRangeReadOptions(layout_check="error")
+        )
+    layout_validator.assert_called_once()
+
+
+def test_nwb_layout_check_revalidates_changed_coalescing_policy(layout_validator):
+    data = np.arange(8 * 4, dtype=np.int16).reshape(8, 4)
+    rfs, _ = _make_electrical_series_rfs(
+        data, "https://example.invalid/object", chunks=(4, 1), channel_major=True
+    )
+    rfs["refs"]["acquisition/TestElectricalSeries/data/1.0"][1] += 1
+    options = lindi.LindiRangeReadOptions(
+        max_gap_bytes=1, max_overread_bytes=1, layout_check="error"
+    )
+    with lindi.LindiH5pyFile.from_reference_file_system(rfs, range_read_options=options):
+        pass
+    with pytest.raises(lindi.LindiRangeLayoutError, match="not channel-major"):
+        lindi.LindiH5pyFile.from_reference_file_system(
+            rfs, range_read_options=lindi.LindiRangeReadOptions(layout_check="error")
+        )
+    assert layout_validator.call_count == 2
+
+
+def test_nwb_layout_check_revalidates_changed_transport_latency(layout_validator):
+    data = np.arange(8 * 4, dtype=np.int16).reshape(8, 4)
+    rfs, _ = _make_electrical_series_rfs(
+        data, "https://example.invalid/object", chunks=(4, 2), channel_major=True
+    )
+    options = lindi.LindiRangeReadOptions(layout_check="error")
+    with lindi.LindiH5pyFile.from_reference_file_system(
+        rfs, range_read_options=options, range_transports={"https": LocalFileRangeTransport}
+    ):
+        pass
+    with pytest.raises(lindi.LindiRangeLayoutError, match="up to 2 channels"):
+        lindi.LindiH5pyFile.from_reference_file_system(rfs, range_read_options=options)
+    assert layout_validator.call_count == 2
 
 
 def test_nwb_layout_check_reports_channel_and_physical_amplification():

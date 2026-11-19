@@ -1,10 +1,13 @@
 import contextvars
+import hashlib
 import inspect
 import json
+import marshal
 import os
 import threading
 import time
 import warnings
+from collections import OrderedDict
 from dataclasses import dataclass, field, replace
 from typing import Any, List, Sequence, Set, Tuple, Union
 
@@ -261,11 +264,104 @@ def _warn_for_query_inefficiency(
         )
 
 
-def validate_nwb_electrical_series_layout(store: Any) -> None:
+_MAX_CACHED_LAYOUTS = 32
+_MAX_CACHED_LAYOUT_SOURCES = 64
+_layout_cache = OrderedDict()
+_layout_cache_lock = threading.Lock()
+
+
+def _reset_layout_cache_after_fork() -> None:
+    global _layout_cache_lock
+    _layout_cache_lock = threading.Lock()
+    _layout_cache.clear()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_reset_layout_cache_after_fork)
+
+
+def _layout_cache_key(store: Any):
+    # Relative TAR/directory references depend on container offsets and file sizes.
+    if store._source_tar_file is not None:
+        return None
+    options = store.range_read_options
+    if type(options.max_gap_bytes) is not int or type(options.max_overread_bytes) is not int:
+        return None
+    try:
+        # Format 2 preserves types and order without encoding object sharing.
+        # Separately parsed dictionaries therefore hash the same.
+        contents = marshal.dumps((store.rfs["refs"], store.rfs.get("templates", {})), 2)
+    except (TypeError, ValueError):
+        return None
+    return (
+        hashlib.sha256(contents).digest(),
+        options.max_gap_bytes,
+        options.max_overread_bytes,
+    )
+
+
+def check_nwb_electrical_series_layout(store: Any) -> None:
+    """Check the layout on open, reusing diagnostics for unchanged inputs."""
+    options = store.range_read_options
+    if not options.enabled or options.layout_check == "ignore":
+        return
+    key = _layout_cache_key(store)
+    with _layout_cache_lock:
+        cached = _layout_cache.get(key)
+        if cached is not None:
+            _layout_cache.move_to_end(key)
+
+    # Custom transport factories can classify the same source differently.
+    # Resolve only the sources that the validator actually used.
+    if cached is not None and all(
+        _is_high_latency_source(store, source) == high_latency
+        for source, high_latency in cached[1]
+    ):
+        _report_layout_issue(cached[0], options)
+    else:
+        validate_nwb_electrical_series_layout(store, _cache_key=key)
+
+
+def _report_layout_issue(message: Union[str, None], options: LindiRangeReadOptions) -> None:
+    if message is not None:
+        if options.layout_check == "error":
+            raise LindiRangeLayoutError(message)
+        _warn_at_user_callsite(message, LindiRangeLayoutWarning)
+
+
+def validate_nwb_electrical_series_layout(store: Any, *, _cache_key=None) -> None:
     """Validate high-latency NWB references without fetching data."""
     options = store.range_read_options
     if not options.enabled or options.layout_check == "ignore":
         return
+
+    source_latencies = {} if _cache_key is not None else None
+    message = _find_nwb_electrical_series_layout_issue(store, source_latencies)
+    if (
+        source_latencies is not None
+        and len(source_latencies) <= _MAX_CACHED_LAYOUT_SOURCES
+        and None not in source_latencies.values()
+    ):
+        with _layout_cache_lock:
+            _layout_cache[_cache_key] = (message, tuple(source_latencies.items()))
+            _layout_cache.move_to_end(_cache_key)
+            if len(_layout_cache) > _MAX_CACHED_LAYOUTS:
+                _layout_cache.popitem(last=False)
+    _report_layout_issue(message, options)
+
+
+def _find_nwb_electrical_series_layout_issue(
+    store: Any, source_latencies: Union[dict, None] = None
+) -> Union[str, None]:
+    def is_high_latency(source: str) -> bool:
+        high_latency = _is_high_latency_source(store, source)
+        if source_latencies is not None and len(source_latencies) <= _MAX_CACHED_LAYOUT_SOURCES:
+            if source_latencies.setdefault(source, high_latency) != high_latency:
+                # A changing capability cannot be replayed safely.
+                source_latencies[source] = None
+        return high_latency
+
+    options = store.range_read_options
     refs = store.rfs["refs"]
     electrical_series_paths = []
     for key, value in refs.items():
@@ -290,7 +386,7 @@ def validate_nwb_electrical_series_layout(store: Any) -> None:
         external_link = data_attrs.get("_EXTERNAL_ARRAY_LINK")
         if isinstance(external_link, dict):
             url = external_link.get("url")
-            if isinstance(url, str) and _is_high_latency_source(store, url):
+            if isinstance(url, str) and is_high_latency(url):
                 issues.append(
                     f"{data_path} uses _EXTERNAL_ARRAY_LINK, so explicit range "
                     "planning and layout validation are unavailable"
@@ -334,7 +430,7 @@ def validate_nwb_electrical_series_layout(store: Any) -> None:
                 if (
                     reference.url_or_path is None
                     or reference.length == 0
-                    or not _is_high_latency_source(store, reference.url_or_path)
+                    or not is_high_latency(reference.url_or_path)
                 ):
                     continue
                 high_latency_reference_count += 1
@@ -366,17 +462,14 @@ def validate_nwb_electrical_series_layout(store: Any) -> None:
             )
 
     if not issues:
-        return
-    message = (
+        return None
+    return (
         "High-latency NWB layout check found inefficient ElectricalSeries data: "
         + "; ".join(issues)
         + ". Repack the source into time-by-one-channel chunks stored channel-major "
         "and regenerate the LINDI sidecar with explicit chunk references. Set "
         "layout_check='ignore' only when this behavior is intentional."
     )
-    if options.layout_check == "error":
-        raise LindiRangeLayoutError(message)
-    _warn_at_user_callsite(message, LindiRangeLayoutWarning)
 
 
 def _is_high_latency_source(store: Any, source: str) -> bool:
