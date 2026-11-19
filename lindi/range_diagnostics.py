@@ -6,6 +6,7 @@ import threading
 import time
 import warnings
 from dataclasses import dataclass, field, replace
+from functools import cache, partial
 from typing import Any, List, Sequence, Set, Tuple, Union
 
 import numpy as np
@@ -266,6 +267,7 @@ def validate_nwb_electrical_series_layout(store: Any) -> None:
     options = store.range_read_options
     if not options.enabled or options.layout_check == "ignore":
         return
+    is_high_latency_source = cache(partial(_is_high_latency_source, store))
     refs = store.rfs["refs"]
     electrical_series_paths = []
     for key, value in refs.items():
@@ -290,7 +292,7 @@ def validate_nwb_electrical_series_layout(store: Any) -> None:
         external_link = data_attrs.get("_EXTERNAL_ARRAY_LINK")
         if isinstance(external_link, dict):
             url = external_link.get("url")
-            if isinstance(url, str) and _is_high_latency_source(store, url):
+            if isinstance(url, str) and is_high_latency_source(url):
                 issues.append(
                     f"{data_path} uses _EXTERNAL_ARRAY_LINK, so explicit range "
                     "planning and layout validation are unavailable"
@@ -334,7 +336,7 @@ def validate_nwb_electrical_series_layout(store: Any) -> None:
                 if (
                     reference.url_or_path is None
                     or reference.length == 0
-                    or not _is_high_latency_source(store, reference.url_or_path)
+                    or not is_high_latency_source(reference.url_or_path)
                 ):
                     continue
                 high_latency_reference_count += 1
