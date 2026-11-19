@@ -827,7 +827,9 @@ def test_nwb_layout_check_revalidates_changed_coalescing_policy(layout_validator
     assert layout_validator.call_count == 2
 
 
-def test_nwb_layout_check_revalidates_changed_transport_latency(layout_validator):
+def test_nwb_layout_check_revalidates_changed_transport_latency(layout_validator, monkeypatch):
+    classify = Mock(wraps=range_diagnostics._is_high_latency_source)
+    monkeypatch.setattr(range_diagnostics, "_is_high_latency_source", classify)
     data = np.arange(8 * 4, dtype=np.int16).reshape(8, 4)
     rfs, _ = _make_electrical_series_rfs(
         data, "https://example.invalid/object", chunks=(4, 2), channel_major=True
@@ -840,6 +842,58 @@ def test_nwb_layout_check_revalidates_changed_transport_latency(layout_validator
     with pytest.raises(lindi.LindiRangeLayoutError, match="up to 2 channels"):
         lindi.LindiH5pyFile.from_reference_file_system(rfs, range_read_options=options)
     assert layout_validator.call_count == 2
+    assert [call.args[1] for call in classify.call_args_list] == [
+        "https://example.invalid/object",
+        "https://example.invalid/object",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("source", "high_latency"),
+    [
+        ("/local/recording.nwb", False),
+        ("http://example.invalid/recording.nwb", True),
+        ("s3://bucket/recording.nwb", True),
+    ],
+)
+def test_nwb_open_classifies_each_source_once(monkeypatch, source, high_latency):
+    from lindi.s3_transport import S3RangeTransport
+
+    classify = range_diagnostics._is_high_latency_source
+    classifications = []
+
+    def track_classification(store, url):
+        result = classify(store, url)
+        classifications.append((url, result))
+        return result
+
+    monkeypatch.setattr(range_diagnostics, "_is_high_latency_source", track_classification)
+    data = np.arange(8 * 4, dtype=np.int16).reshape(8, 4)
+    second_source = f"{source}.second"
+    rfs, _ = _make_electrical_series_rfs(
+        data, source, chunks=(4, 2), channel_major=True
+    )
+    # Both channel chunks refer to each source, so each source is seen twice.
+    for key in ("1.0", "1.1"):
+        rfs["refs"][f"acquisition/TestElectricalSeries/data/{key}"][0] = second_source
+
+    for _ in range(2):
+        classifications.clear()
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always", lindi.LindiRangeLayoutWarning)
+            with lindi.LindiH5pyFile.from_reference_file_system(
+                rfs, range_transports={"s3": S3RangeTransport}
+            ):
+                pass
+        assert classifications == [(source, high_latency), (second_source, high_latency)]
+        layout_messages = [
+            str(warning.message)
+            for warning in caught
+            if warning.category is lindi.LindiRangeLayoutWarning
+        ]
+        assert len(layout_messages) == int(high_latency)
+        if high_latency:
+            assert "up to 2 channels" in layout_messages[0]
 
 
 def test_nwb_layout_check_reports_channel_and_physical_amplification():

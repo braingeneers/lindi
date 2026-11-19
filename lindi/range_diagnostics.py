@@ -9,7 +9,8 @@ import time
 import warnings
 from collections import OrderedDict
 from dataclasses import dataclass, field, replace
-from typing import Any, List, Sequence, Set, Tuple, Union
+from functools import cache, partial
+from typing import Any, Callable, List, Sequence, Set, Tuple, Union
 
 import numpy as np
 
@@ -312,14 +313,17 @@ def check_nwb_electrical_series_layout(store: Any) -> None:
             _layout_cache.move_to_end(key)
 
     # Custom transport factories can classify the same source differently.
-    # Resolve only the sources that the validator actually used.
+    # Share classifications with validation if the cached result cannot be used.
+    classify_source = cache(partial(_is_high_latency_source, store))
     if cached is not None and all(
-        _is_high_latency_source(store, source) == high_latency
+        classify_source(source) == high_latency
         for source, high_latency in cached[1]
     ):
         _report_layout_issue(cached[0], options)
     else:
-        validate_nwb_electrical_series_layout(store, _cache_key=key)
+        validate_nwb_electrical_series_layout(
+            store, _cache_key=key, _classify_source=classify_source
+        )
 
 
 def _report_layout_issue(message: Union[str, None], options: LindiRangeReadOptions) -> None:
@@ -329,18 +333,24 @@ def _report_layout_issue(message: Union[str, None], options: LindiRangeReadOptio
         _warn_at_user_callsite(message, LindiRangeLayoutWarning)
 
 
-def validate_nwb_electrical_series_layout(store: Any, *, _cache_key=None) -> None:
+def validate_nwb_electrical_series_layout(
+    store: Any,
+    *,
+    _cache_key=None,
+    _classify_source: Union[Callable[[str], bool], None] = None,
+) -> None:
     """Validate high-latency NWB references without fetching data."""
     options = store.range_read_options
     if not options.enabled or options.layout_check == "ignore":
         return
 
+    if _classify_source is None:
+        _classify_source = cache(partial(_is_high_latency_source, store))
     source_latencies = {} if _cache_key is not None else None
-    message = _find_nwb_electrical_series_layout_issue(store, source_latencies)
+    message = _find_nwb_electrical_series_layout_issue(store, _classify_source, source_latencies)
     if (
         source_latencies is not None
         and len(source_latencies) <= _MAX_CACHED_LAYOUT_SOURCES
-        and None not in source_latencies.values()
     ):
         with _layout_cache_lock:
             _layout_cache[_cache_key] = (message, tuple(source_latencies.items()))
@@ -351,14 +361,14 @@ def validate_nwb_electrical_series_layout(store: Any, *, _cache_key=None) -> Non
 
 
 def _find_nwb_electrical_series_layout_issue(
-    store: Any, source_latencies: Union[dict, None] = None
+    store: Any,
+    classify_source: Callable[[str], bool],
+    source_latencies: Union[dict, None],
 ) -> Union[str, None]:
     def is_high_latency(source: str) -> bool:
-        high_latency = _is_high_latency_source(store, source)
+        high_latency = classify_source(source)
         if source_latencies is not None and len(source_latencies) <= _MAX_CACHED_LAYOUT_SOURCES:
-            if source_latencies.setdefault(source, high_latency) != high_latency:
-                # A changing capability cannot be replayed safely.
-                source_latencies[source] = None
+            source_latencies[source] = high_latency
         return high_latency
 
     options = store.range_read_options
