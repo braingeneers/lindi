@@ -5,12 +5,54 @@ from __future__ import annotations
 import ctypes
 import os
 import sys
+import threading
 from functools import lru_cache
 from pathlib import Path
 
 import numpy as np
 from numcodecs.abc import Codec
 from numcodecs.registry import register_codec
+
+
+_plugin_paths: dict[tuple[str | None, str], str] = {}
+_plugin_paths_lock = threading.Lock()
+
+
+def _reset_plugin_paths_after_fork() -> None:
+    global _plugin_paths, _plugin_paths_lock
+    # The parent may have forked while another thread held the lock.
+    _plugin_paths_lock = threading.Lock()
+    _plugin_paths = {}
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_reset_plugin_paths_after_fork)
+
+
+def _resolve_plugin_path(plugin_path: str | None) -> str:
+    plugin_path = plugin_path or None
+    search_path = "" if plugin_path else os.environ.get("HDF5_PLUGIN_PATH", "")
+    key = (plugin_path, search_path)
+    with _plugin_paths_lock:
+        resolved = _plugin_paths.get(key)
+        if resolved is not None:
+            return resolved
+
+        if plugin_path:
+            candidates = [Path(plugin_path).expanduser()]
+        else:
+            candidates = [Path(directory) for directory in search_path.split(os.pathsep) if directory]
+            candidates.append(Path.home() / "hdf5_plugin_path_maxwell")
+        for candidate in candidates:
+            if candidate.is_dir():
+                candidate = candidate / "libcompression.so"
+            if candidate.is_file():
+                resolved = str(candidate.resolve())
+                _plugin_paths[key] = resolved
+                return resolved
+
+        # A later call can succeed if the plugin is installed in the meantime.
+        raise RuntimeError("Maxwell decoder unavailable; set HDF5_PLUGIN_PATH or plugin_path")
 
 
 @lru_cache(maxsize=4)
@@ -54,6 +96,10 @@ class MaxwellMxwDataCodec(Codec):
         hdf5_filter_id: expected maxwell hdf5 filter id
         codec_version: supported wire format version
         plugin_path: explicit shared library path or directory
+
+        Each explicit path or HDF5_PLUGIN_PATH value is resolved on its first
+        successful lookup in the process. Relative paths use the working
+        directory at that lookup.
         """
         if hdf5_filter_id != 401 or codec_version != 1:
             raise ValueError("Unsupported Maxwell filter or codec version")
@@ -92,23 +138,11 @@ class MaxwellMxwDataCodec(Codec):
         --------
         decoded bytes or the supplied destination
         """
-        candidates = []
-        if self.plugin_path:
-            candidates.append(Path(self.plugin_path).expanduser())
-        else:
-            candidates.extend(
-                Path(directory) for directory in os.environ.get("HDF5_PLUGIN_PATH", "").split(os.pathsep)
-                if directory
-            )
-            candidates.append(Path.home() / "hdf5_plugin_path_maxwell")
-        candidates = [p / "libcompression.so" if p.is_dir() else p for p in candidates]
-        plugin = next((p for p in candidates if p.is_file()), None)
-        if plugin is None:
-            raise RuntimeError("Maxwell decoder unavailable; set HDF5_PLUGIN_PATH or plugin_path")
+        plugin = _resolve_plugin_path(self.plugin_path)
         compressed = memoryview(buf).cast("B").tobytes()
         if not compressed:
             raise ValueError("Cannot decode an empty Maxwell chunk")
-        _library, decompress, release = _native_decoder(str(plugin.resolve()))
+        _library, decompress, release = _native_decoder(plugin)
         source = (ctypes.c_uint8 * len(compressed)).from_buffer_copy(compressed)
         pointer = ctypes.POINTER(ctypes.c_uint16)()
         count = int(decompress(source, len(compressed), ctypes.byref(pointer)))
